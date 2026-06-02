@@ -10,4 +10,6 @@ namespace Hooks_SteamUI {
 
     // Queues an appId for removal from the library UI
     void QueueRemoval(AppId_t appId);
+    // Cancels a queued removal when the app is added again before the UI drains it.
+    void CancelRemoval(AppId_t appId);
 }
