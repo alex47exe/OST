@@ -10,6 +10,7 @@ namespace {
 
     CAPTURE_THIS_FUNC(GetAppByID, CSteamApp*, g_pController,void* pThis, AppId_t appId, bool bCreate);
     CAPTURE_THIS_FUNC(MarkAppChange,void*,g_pAppChangeSource,void* pThis,AppId_t appId, EAppChangeFlags changeFlags);
+    RESOLVE_FUNC(ShouldShowAppInLibrary,bool,CSteamApp* pApp);
 
     HOOK_FUNC(FillInAppOverview,void*,void* pThis,void* pAppOverview,CSteamApp* pApp)
     {
@@ -31,25 +32,88 @@ namespace {
     std::vector<AppId_t>  g_pendingRemovals;
     constexpr uint32 kBudgetDivisor = 3;
 
-    // Clears the ownership flag for appId and queues an app change so the overview
-    // flush re-evaluates it.
-    bool RemoveAppAndSendChange(AppId_t appId) {
-        // skip on owned apps
-        if(LuaConfig::IsOwned(appId)){
-            LOG_STEAMUI_WARN("RemoveAppAndSendChange: appId={} is owned, skipping", appId);
+    struct RemovalCandidate {
+        AppId_t appId;
+        CSteamApp* app;
+    };
+
+    void PullQueuedRemovals(std::vector<AppId_t>& draining) {
+        std::lock_guard<std::mutex> lock(g_removalMutex);
+        if (g_pendingRemovals.empty()) return;
+
+        draining.insert(draining.end(), g_pendingRemovals.begin(), g_pendingRemovals.end());
+        g_pendingRemovals.clear();
+    }
+
+    std::vector<RemovalCandidate> CollectVisibleRemovalCandidates(void* pController, const std::vector<AppId_t>& draining)
+    {
+        std::vector<RemovalCandidate> candidates;
+
+        for (AppId_t appId : draining) {
+            if (LuaConfig::IsOwned(appId)) {
+                LOG_STEAMUI_WARN("CollectVisibleRemovalCandidates: appId={} is owned, skipping", appId);
+                continue;
+            }
+
+            CSteamApp* app = oGetAppByID(pController, appId, false);
+            if (!app) {
+                LOG_STEAMUI_TRACE("CollectVisibleRemovalCandidates: appId={} not found, skipping", appId);
+                continue;
+            }
+
+            if (!oShouldShowAppInLibrary(app)) {
+                LOG_STEAMUI_TRACE("CollectVisibleRemovalCandidates: appId={} is not visible, skipping", appId);
+                continue;
+            }
+
+            candidates.push_back({appId, app});
+        }
+        return candidates;
+    }
+
+    // Clears the ownership flag and queues an app change so the overview flush
+    // re-evaluates a candidate already validated during this UI frame.
+    bool RemoveAppAndSendChange(const RemovalCandidate& candidate) {
+        if (LuaConfig::IsOwned(candidate.appId)) {
+            LOG_STEAMUI_WARN("RemoveAppAndSendChange: appId={} became owned, skipping", candidate.appId);
             return false;
         }
-        if(CAPTURE_READY(GetAppByID) && CAPTURE_READY(MarkAppChange)) {
-            CSteamApp* pApp = oGetAppByID(g_pController, appId, false);
-            if(pApp) {
-                pApp->OwnershipFlags = k_EAppOwnershipFlags_None;
-                LOG_STEAMUI_DEBUG("RemoveAppAndSendChange: cleared owned flag for appId={}", appId);
-                oMarkAppChange(g_pAppChangeSource, appId, EAppChangeFlags::AddedOrCreated);
-                return true;
-            }
-            LOG_STEAMUI_WARN("RemoveAppAndSendChange: appId={} not found in GetAppByID", appId);
+
+        candidate.app->OwnershipFlags = k_EAppOwnershipFlags_None;
+        LOG_STEAMUI_DEBUG("RemoveAppAndSendChange: cleared owned flag for appId={}", candidate.appId);
+        oMarkAppChange(g_pAppChangeSource, candidate.appId, EAppChangeFlags::AddedOrCreated);
+        return true;
+    }
+
+    void DrainRemovalBatch(void* pController, std::vector<AppId_t>& draining) {
+        if(!CAPTURE_READY(GetAppByID) || !CAPTURE_READY(MarkAppChange) || !oShouldShowAppInLibrary){
+            LOG_STEAMUI_WARN("DrainRemovalBatch: dependencies not ready, skipping drain");
+            return;
         }
-        return false;
+        if (draining.empty()) return;
+
+        std::vector<RemovalCandidate> candidates = CollectVisibleRemovalCandidates(pController, draining);
+
+        size_t budget = candidates.size() / kBudgetDivisor;
+        if (!candidates.empty() && budget == 0)
+        budget = 1;
+
+        size_t marked = 0;
+        // Rebuild the work queue with candidates deferred to the next frame.
+        // Items removed within this frame are intentionally left out.
+        draining.clear();
+        for (const RemovalCandidate& candidate : candidates) {
+            if (marked >= budget) {
+                draining.push_back(candidate.appId);
+                continue;
+            }
+
+            if (RemoveAppAndSendChange(candidate))
+                ++marked;
+        }
+
+        LOG_STEAMUI_DEBUG("RunFrame: visible removals={}, removed={}, deferred={}",
+                            candidates.size(), marked, draining.size());
     }
 
     // CSteamUIAppController::RunFrame - the controller's per-frame tick on the UI
@@ -59,37 +123,8 @@ namespace {
     {
         static std::vector<AppId_t> s_draining;
 
-        // Pull anything the FileWatcher thread queued into our UI-thread work set.
-        {
-            std::lock_guard<std::mutex> lock(g_removalMutex);
-            if (!g_pendingRemovals.empty()) {
-                s_draining.insert(s_draining.end(),g_pendingRemovals.begin(), g_pendingRemovals.end());
-                g_pendingRemovals.clear();
-            }
-        }
-
-        if (!s_draining.empty() && CAPTURE_READY(GetAppByID)) {
-            // Recompute the budget from the library-visible apps still queued
-            // remove a third of them this frame. 
-            size_t existing = 0;
-            for (AppId_t id : s_draining) {
-                if (oGetAppByID(g_pController, id, false)){
-                    ++existing;
-                }
-            }
-            LOG_STEAMUI_DEBUG("RunFrame: {} pending removals, {} still exist", s_draining.size(), existing);
-
-            size_t budget = existing / kBudgetDivisor;
-            if (budget == 0) budget = 1;
-            size_t marked = 0;
-            while (!s_draining.empty() && marked < budget) {
-                AppId_t id = s_draining.back();
-                s_draining.pop_back();
-                if (RemoveAppAndSendChange(id))   // depotids/unknown ids are free
-                    ++marked;
-            }
-            LOG_STEAMUI_DEBUG("RunFrame: removed {} app(s), {} left", marked, s_draining.size());
-        }
+        PullQueuedRemovals(s_draining);
+        DrainRemovalBatch(pController, s_draining);
         return oCSteamUIAppControllerRunFrame(pController);
     }
 }
@@ -100,6 +135,8 @@ namespace Hooks_SteamUI {
         ARM_CAPTURE_U(GetAppByID);
         ARM_CAPTURE_U(MarkAppChange);
 
+        RESOLVE_U(ShouldShowAppInLibrary);
+        
         HOOK_BEGIN();
         INSTALL_HOOK_U(FillInAppOverview);
         INSTALL_HOOK_U(CSteamUIAppControllerRunFrame);
