@@ -187,19 +187,14 @@ namespace {
         return out;
     }
 
-    static void ShowMissingPopup(const std::string& sha256)
+    // Queue for the single summary popup shown after all loaders have run.
+    static void ReportMissing(const std::string& sha256)
     {
-        SteamDiagnostics::ShowWarning(
-            "OpenSteamTool - IPC spec missing",
-            "OpenSteamTool: IPC spec file not found.\n\n"
-            "IPC interception is disabled for this session; pattern-based "
-            "hooks are unaffected.\n\n"
-            "You can:\n"
-            "  1. Wait for the next upstream publish and restart Steam.\n"
-            "  2. Drop a matching TOML at:\n"
-            "       <Steam>\\opensteamtool\\ipc\\steamclient\\" + sha256 + ".toml\n"
-            "  3. Check upstream:\n"
-            "       https://github.com/OpenSteam001/steam-monitor/tree/ipc/steamclient");
+        SteamDiagnostics::ReportMissingMetadata({
+            "IPC spec for steamclient64.dll",
+            "ipc\\steamclient\\" + sha256 + ".toml",
+            "https://github.com/OpenSteam001/steam-monitor/tree/ipc/steamclient",
+        });
     }
 
 } // namespace
@@ -307,7 +302,7 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle steamclient, const std::stri
     for (auto& iface : ifaces) g_registry.Add(std::move(iface));
 
     if (MethodCount() == 0) {
-        ShowMissingPopup(r.sha256.empty() ? "(hash failed)" : r.sha256);
+        ReportMissing(r.sha256.empty() ? "(hash failed)" : r.sha256);
         return false;
     }
 

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace SteamDiagnostics {
 
@@ -23,6 +24,9 @@ namespace {
     };
 
     Snapshot g_snapshot;
+
+    // Filled and drained on the init worker thread only.
+    std::vector<MissingMetadata> g_missingMetadata;
 
     static std::string DetectSteamBuildID()
     {
@@ -101,6 +105,39 @@ void ShowWarning(std::string title, std::string message)
                  message = AppendSnapshot(std::move(message))]() {
         OSTPlatform::Dialog::ShowWarning(title, message);
     }).detach();
+}
+
+void ReportMissingMetadata(MissingMetadata entry)
+{
+    g_missingMetadata.push_back(std::move(entry));
+}
+
+void ShowMissingMetadataSummary()
+{
+    if (g_missingMetadata.empty()) return;
+
+    std::string missing;
+    std::string paths;
+    std::string upstream;
+    for (const auto& m : g_missingMetadata) {
+        missing  += "  - " + m.description + "\n";
+        paths    += "       <Steam>\\opensteamtool\\" + m.cachePath + "\n";
+        upstream += "       " + m.upstreamUrl + "\n";
+    }
+    g_missingMetadata.clear();
+
+    ShowWarning(
+        "OpenSteamTool - Unsupported Steam Version",
+        "OpenSteamTool has no compatibility data for this Steam build.\n\n"
+        "Missing:\n" + missing + "\n"
+        "Hooks that depend on the missing data are disabled for this "
+        "session; everything else keeps working.\n\n"
+        "You can:\n"
+        "  1. Wait for the next upstream update, then restart Steam.\n"
+        "  2. Drop matching TOML files at:\n" + paths +
+        "  3. Check upstream:\n" + upstream +
+        "  4. Report the diagnostics below:\n"
+        "       https://github.com/OpenSteam001/OpenSteamTool/issues");
 }
 
 } // namespace SteamDiagnostics

@@ -101,31 +101,6 @@ static void* ScanModule(OSTPlatform::DynamicLibrary::ModuleHandle module,
     return nullptr;
 }
 
-// ---- popup helpers (detached threads so we never block Steam) ----
-
-// Surface a missing pattern file to the user, with enough detail to either
-// (a) drop a file in manually, (b) check the upstream repo, or (c) file
-// an actionable bug report.  We deliberately only disable hooks for the
-// failing module — the rest of OpenSteamTool keeps working.
-static void ShowDownloadFailedPopup(const std::string& dllName,
-                                    const std::string& sha256,
-                                    const std::string& component)
-{
-    SteamDiagnostics::ShowWarning(
-        "OpenSteamTool - Unsupported Steam Version",
-        "OpenSteamTool: signature file not found for " + dllName + ".\n\n"
-        "Hooks that depend on " + dllName + " are disabled for this session; "
-        "other modules are unaffected.\n\n"
-        "You can:\n"
-        "  1. Wait for the next signature update, then restart Steam.\n"
-        "  2. Drop a matching TOML at:\n"
-        "       <Steam>\\opensteamtool\\pattern\\" + component + "\\" + sha256 + ".toml\n"
-        "  3. Check upstream:\n"
-        "       https://github.com/OpenSteam001/steam-monitor/tree/pattern/" + component + "\n"
-        "  4. Report the diagnostics below:\n"
-        "       https://github.com/OpenSteam001/OpenSteamTool/issues");
-}
-
 } // namespace
 
 // ---- public API ----
@@ -207,10 +182,16 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
         return true;
     }
 
-    // Total failure — popup + disable module's hooks.
+    // Total failure — queue for the single summary popup (shown by the caller
+    // once every loader has run) + disable module's hooks.
     std::string dllName = fs::path(dllPath).filename().string();
     std::string sha     = r.sha256.empty() ? "(hash failed)" : r.sha256;
-    ShowDownloadFailedPopup(dllName, sha, component);
+    SteamDiagnostics::ReportMissingMetadata({
+        dllName + " signatures",
+        std::string(kPatternChannel) + "\\" + component + "\\" + sha + ".toml",
+        "https://github.com/OpenSteam001/steam-monitor/tree/" +
+            std::string(kPatternChannel) + "/" + component,
+    });
     g_failedModules.insert(module);
     return false;
 }
@@ -218,7 +199,7 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
 void* FindPattern(OSTPlatform::DynamicLibrary::ModuleHandle module, const char* funcName)
 {
     // If the whole module's pattern file failed to load, stay quiet — the
-    // user already saw one popup and the main.log already has the warning.
+    // user already gets the missing-metadata popup and main.log has the warning.
     // No point amplifying that into one log line per hook plus a second
     // "missing functions" popup later.
     if (g_failedModules.count(module)) {

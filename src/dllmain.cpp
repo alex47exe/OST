@@ -68,6 +68,9 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     // IPC method metadata (funcHash, fencepost, argc, ...)
     IPCLoader::Load(client_hModule, SteamclientPath);
 
+    // One popup for every metadata file that was missing, instead of one each.
+    SteamDiagnostics::ShowMissingMetadataSummary();
+
     std::vector<std::string> watchDirs = Config::GetLuaPaths();
     watchDirs.push_back(std::string(LuaDir));
     for (const auto& dir : watchDirs)
