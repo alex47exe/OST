@@ -66,7 +66,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     PatternLoader::Load(client_hModule, SteamclientPath, "steamclient");
 
     // IPC method metadata (funcHash, fencepost, argc, ...)
-    IPCLoader::Load(SteamclientPath);
+    IPCLoader::Load(client_hModule, SteamclientPath);
 
     std::vector<std::string> watchDirs = Config::GetLuaPaths();
     watchDirs.push_back(std::string(LuaDir));

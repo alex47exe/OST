@@ -99,3 +99,10 @@ enabled = false
 #
 # url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
 # url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
+#
+# When no published metadata matches the installed Steam build, OpenSteamTool
+# derives it locally from earlier builds (carried-forward signatures checked
+# against real function boundaries; IPC hashes read from the wrappers).
+# Entries it cannot derive safely are left out and reported. Results are cached
+# under opensteamtool/{pattern,ipc}/ and replaced once upstream publishes.
+# auto_derive = true
