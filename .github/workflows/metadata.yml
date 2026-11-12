@@ -1,0 +1,141 @@
+name: Steam metadata
+run-name: Steam metadata${{ github.event_name == 'workflow_dispatch' && ' (manual)' || '' }}
+
+# Publishes pattern / IPC metadata for new Steam client builds to the
+# `pattern` and `ipc` branches, which OpenSteamTool downloads at startup.
+#
+# Every few hours: read Valve's public client-update manifest; if the Steam
+# version is new, download bins_win64 (contains steamclient64.dll and
+# SteamUI.dll), derive metadata with tools/derive_check (the same code the
+# DLL runs locally), commit it, and open an issue for anything that could not
+# be derived safely.
+
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Process the current Steam build even if it was already handled"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: steam-metadata
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Read Steam client manifest
+        id: steam
+        run: |
+          curl -fsS --retry 3 https://client-update.steamstatic.com/steam_client_win64 -o manifest.vdf
+          version=$(grep -m1 '"version"' manifest.vdf | sed -E 's/.*"version"[[:space:]]+"([0-9]+)".*/\1/')
+          # Fields of the "bins_win64" package block.
+          field() {
+            awk -v key="\"$1\"" '
+              /^[[:space:]]*"bins_win64"[[:space:]]*$/ { inblk = 1; next }
+              inblk && /^[[:space:]]*}/                { exit }
+              inblk && $1 == key                       { gsub(/"/, "", $2); print $2; exit }
+            ' manifest.vdf
+          }
+          file=$(field file); sha=$(field sha2)
+          if [ -z "$version" ] || [ -z "$file" ] || [ -z "$sha" ]; then
+            echo "::error::could not parse the Steam client manifest"; cat manifest.vdf | head -40; exit 1
+          fi
+          echo "Steam client version $version, package $file"
+          { echo "version=$version"; echo "file=$file"; echo "sha=$sha"; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: pattern
+          path: metadata/pattern
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ipc
+          path: metadata/ipc
+          fetch-depth: 0
+
+      - name: Already handled?
+        id: seen
+        run: |
+          if [ "${{ inputs.force }}" != "true" ] && grep -qx "${{ steps.steam.outputs.version }}" metadata/pattern/versions.txt 2>/dev/null; then
+            echo "Steam ${{ steps.steam.outputs.version }} already handled."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download Steam client binaries
+        if: steps.seen.outputs.skip != 'true'
+        run: |
+          curl -fsS --retry 3 -o bins.zip "https://client-update.steamstatic.com/${{ steps.steam.outputs.file }}"
+          echo "${{ steps.steam.outputs.sha }}  bins.zip" | sha256sum -c -
+          7z e bins.zip -odlls steamclient64.dll SteamUI.dll -y > /dev/null
+          ls -la dlls
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: steps.seen.outputs.skip != 'true'
+
+      - name: Build derive_check
+        if: steps.seen.outputs.skip != 'true'
+        run: |
+          cmake -S src -B build -G "Ninja Multi-Config"
+          cmake --build build --config Release --target derive_check
+
+      - name: Order baselines by publish time
+        if: steps.seen.outputs.skip != 'true'
+        run: |
+          # derive_check treats the newest TOML as the previous build; a fresh
+          # checkout gives every file the same time, so restore it from git.
+          for repo in metadata/pattern metadata/ipc; do
+            git -C "$repo" ls-files '*.toml' | while read -r f; do
+              t=$(git -C "$repo" log -1 --format=%ct -- "$f")
+              touch -d "@$t" "$repo/$f"
+            done
+          done
+
+      - name: Derive metadata
+        if: steps.seen.outputs.skip != 'true'
+        run: |
+          ./build/Release/derive_check.exe --dlls dlls --metadata metadata --emit \
+            --report report.md --issue issue.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish
+        if: steps.seen.outputs.skip != 'true'
+        run: |
+          v="${{ steps.steam.outputs.version }}"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          grep -qx "$v" metadata/pattern/versions.txt 2>/dev/null || echo "$v" >> metadata/pattern/versions.txt
+          for channel in ipc pattern; do
+            repo="metadata/$channel"
+            git -C "$repo" add -A
+            if git -C "$repo" diff --cached --quiet; then
+              echo "$channel: nothing to publish"
+              continue
+            fi
+            git -C "$repo" commit -q -m "Steam $v: $channel metadata"
+            git -C "$repo" push origin "HEAD:$channel"
+          done
+
+      - name: Open issue for gaps
+        if: steps.seen.outputs.skip != 'true' && hashFiles('issue.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Steam ${{ steps.steam.outputs.version }}: metadata needs manual signatures" \
+            --body-file issue.md
