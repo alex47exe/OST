@@ -1,12 +1,12 @@
-# Steam Client Rule Patterns
+# OpenSteamTool metadata: `pattern`
 
-Automatically published by steam-monitor. Do not edit by hand.
+Per-build Steam client metadata consumed by [OpenSteamTool](https://github.com/matheeshapathirana/OpenSteamTool),
+laid out as `<component>/<sha256 of the DLL>.toml`.
 
-## Latest Steam client versions
+New Steam builds are published automatically by the
+[Steam metadata workflow](https://github.com/matheeshapathirana/OpenSteamTool/blob/main/.github/workflows/metadata.yml).
+History up to September 2026 is imported from
+[OpenSteam001/steam-monitor](https://github.com/OpenSteam001/steam-monitor), which is no longer updated.
 
-The version number is the client build's Unix timestamp; the Updated column shows it in UTC.
-
-| Channel | Version | Updated (UTC) |
-| --- | --- | --- |
-| Stable | 1788652215 | 2026-09-05 23:50:15 UTC |
-| Beta | 1788652215 | 2026-09-05 23:50:15 UTC |
+Entries that could not be derived automatically are tracked as issues; to fix
+one, add the signature to the matching TOML here.
