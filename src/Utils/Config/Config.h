@@ -42,6 +42,7 @@ namespace Config {
     InjectionSettings GetInjectionSettings();
     CloudSettings GetCloudSettings();
     bool GetStatsEnableApi();
+    std::string GetStatsApiUrl();
 
     // [manifest] — provider selection lives in ManifestClient (table-driven).
     inline uint32_t manifestTimeoutResolve = 5000;
@@ -64,6 +65,7 @@ namespace Config {
 
     // [stats]
     inline bool statsEnableApi = true;
+    inline std::string statsApiUrl = "https://stats.opensteamtool.com/{appid}";
 
     // [inject] - optional library injection into game processes.
     inline bool injectEnabled = false;

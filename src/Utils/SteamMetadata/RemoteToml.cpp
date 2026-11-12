@@ -2,6 +2,7 @@
 #include "OSTPlatform/include/Http.h"
 #include "Utils/Config/Config.h"
 #include "Utils/Logging/Log.h"
+#include "Utils/ProjectInfo.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 
 #include <algorithm>
@@ -14,12 +15,10 @@
 namespace RemoteToml {
 
 namespace {
-    constexpr const char* kGithubTemplate =
-        "https://raw.githubusercontent.com/OpenSteam001/steam-monitor/"
-        "{channel}/{component}/{sha256}.toml";
-    constexpr const char* kJsdelivrTemplate =
-        "https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@"
-        "{channel}/{component}/{sha256}.toml";
+    struct Source {
+        std::string origin;
+        std::string urlTemplate;
+    };
 
     static bool HasPlaceholder(std::string_view text, std::string_view placeholder)
     {
@@ -54,11 +53,15 @@ namespace {
         return urlTemplate;
     }
 
-    static std::vector<std::string> BuildUrlTemplates()
+    static std::vector<Source> BuildSources()
     {
         const std::string remoteUrlTemplate = Config::GetRemoteUrlTemplate();
-        if (remoteUrlTemplate.empty())
-            return { kGithubTemplate, kJsdelivrTemplate };
+        if (remoteUrlTemplate.empty()) {
+            std::vector<Source> sources;
+            for (const auto& s : ProjectInfo::kMetadataSources)
+                sources.push_back({s.origin, s.urlTemplate});
+            return sources;
+        }
 
         if (!IsValidTemplate(remoteUrlTemplate)) {
             LOG_WARN("RemoteToml: remote.url_template must contain "
@@ -66,7 +69,7 @@ namespace {
             return {};
         }
 
-        return { remoteUrlTemplate };
+        return { {"custom", remoteUrlTemplate} };
     }
 
     static std::filesystem::path CacheDirFor(const Request& request)
@@ -107,13 +110,16 @@ Result Fetch(const Request& request)
                  request.channel, request.component, cacheDir.string(), mkdirEc.message());
     }
 
-    // 3. Try remote (mirror chain with early-out on 404).
-    const std::vector<std::string> urlTemplates = BuildUrlTemplates();
+    // 3. Try remote sources in order. Mirrors of one origin serve the same
+    //    data, so a 404 skips the rest of that origin and moves to the next.
+    const std::vector<Source> sources = BuildSources();
     OSTPlatform::Http::Result http;
     std::string lastUrl;
+    std::string skipOrigin;
 
-    for (size_t i = 0; i < urlTemplates.size(); ++i) {
-        lastUrl = ExpandTemplate(urlTemplates[i], request, out.sha256);
+    for (const auto& source : sources) {
+        if (source.origin == skipOrigin) continue;
+        lastUrl = ExpandTemplate(source.urlTemplate, request, out.sha256);
         LOG_INFO("RemoteToml({}/{}): downloading {}",
                  request.channel, request.component, lastUrl);
 
@@ -123,15 +129,14 @@ Result Fetch(const Request& request)
         if (http.ok && http.status == 200) break;
 
         if (http.ok && http.status == 404) {
-            LOG_WARN("RemoteToml({}/{}): mirror has no such file (HTTP 404): {}",
-                     request.channel, request.component, lastUrl);
-            break;   // all mirrors serve same data
+            LOG_WARN("RemoteToml({}/{}): {} has no such file (HTTP 404): {}",
+                     request.channel, request.component, source.origin, lastUrl);
+            skipOrigin = source.origin;
+            continue;
         }
 
-        if (i + 1 < urlTemplates.size()) {
-            LOG_WARN("RemoteToml({}/{}): mirror failed ({} ok={} HTTP={}), falling back",
-                     request.channel, request.component, lastUrl, http.ok, http.status);
-        }
+        LOG_WARN("RemoteToml({}/{}): source failed ({} ok={} HTTP={}), falling back",
+                 request.channel, request.component, lastUrl, http.ok, http.status);
     }
 
     // 4. Remote OK → write cache, return body.

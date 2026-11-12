@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 namespace SteamDiagnostics {
 
@@ -18,12 +19,15 @@ namespace SteamDiagnostics {
     struct MissingMetadata {
         std::string description;  // e.g. "steamui.dll signatures"
         std::string cachePath;    // relative to the opensteamtool dir in Steam
-        std::string upstreamUrl;  // where the bot publishes it
+        std::string upstreamUrl;  // where published metadata can be browsed
     };
 
     // Queue a missing metadata file; nothing is shown until
     // ShowMissingMetadataSummary() so one Steam update yields one popup.
     void ReportMissingMetadata(MissingMetadata entry);
+
+    // Browsable location of published metadata for a channel/component.
+    std::string MetadataBrowseUrl(std::string_view channel, std::string_view component);
 
     // Show a single popup covering everything queued, then clear the queue.
     // No-op when nothing was reported.

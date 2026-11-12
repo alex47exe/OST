@@ -4,6 +4,7 @@
 #include "OSTPlatform/include/DynamicLibrary.h"
 #include "OSTPlatform/include/Hash.h"
 #include "Utils/Logging/Log.h"
+#include "Utils/ProjectInfo.h"
 
 #include <cstdint>
 #include <thread>
@@ -112,6 +113,18 @@ void ReportMissingMetadata(MissingMetadata entry)
     g_missingMetadata.push_back(std::move(entry));
 }
 
+std::string MetadataBrowseUrl(std::string_view channel, std::string_view component)
+{
+    std::string url = ProjectInfo::kMetadataBrowseTemplate;
+    const std::pair<std::string_view, std::string_view> subs[] = {
+        {"{channel}", channel}, {"{component}", component}};
+    for (const auto& [key, value] : subs) {
+        if (const auto pos = url.find(key); pos != std::string::npos)
+            url.replace(pos, key.size(), value);
+    }
+    return url;
+}
+
 void ShowMissingMetadataSummary()
 {
     if (g_missingMetadata.empty()) return;
@@ -133,11 +146,11 @@ void ShowMissingMetadataSummary()
         "Hooks that depend on the missing data are disabled for this "
         "session; everything else keeps working.\n\n"
         "You can:\n"
-        "  1. Wait for the next upstream update, then restart Steam.\n"
+        "  1. Wait for the next metadata update, then restart Steam.\n"
         "  2. Drop matching TOML files at:\n" + paths +
-        "  3. Check upstream:\n" + upstream +
+        "  3. Check published metadata:\n" + upstream +
         "  4. Report the diagnostics below:\n"
-        "       https://github.com/OpenSteam001/OpenSteamTool/issues");
+        "       " + std::string(ProjectInfo::kIssuesUrl));
 }
 
 } // namespace SteamDiagnostics

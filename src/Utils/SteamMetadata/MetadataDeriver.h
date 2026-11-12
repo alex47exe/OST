@@ -8,8 +8,8 @@
 #include <string_view>
 #include <vector>
 
-// Local recovery of pattern / IPC metadata for Steam builds that upstream
-// (steam-monitor) has not published yet.
+// Local recovery of pattern / IPC metadata for Steam builds that have no
+// published metadata yet. The publishing workflow runs the same code.
 //
 // Everything here works on the module as mapped in this process and is biased
 // hard towards "skip" over "guess": a wrong function pointer crashes Steam or
@@ -25,7 +25,7 @@ namespace MetadataDeriver {
         std::string note;      // how the entry was obtained (serialised as a comment)
     };
 
-    // key = Fnv1aHash(name), as used by the steam-monitor TOML section names.
+    // key = Fnv1aHash(name), as used by the published TOML section names.
     using PatternSet = std::map<uint32_t, PatternSpec>;
 
     PatternSet  ParsePatternToml(std::string_view body, std::string* error = nullptr);
@@ -43,9 +43,10 @@ namespace MetadataDeriver {
 
     // Validate `current` against the mapped module (each RVA must be a real
     // function start and its sig must match there). With `derive`, invalid
-    // entries — and, when `current` is empty, every name in `baselines` — are
-    // re-derived from baseline signatures. `baselines` are newest-first; the
-    // first one's RVAs are the "previous build" used to predict locations.
+    // entries — and, when `current` is empty, every name in the first and
+    // last baselines — are re-derived from baseline signatures. `baselines`
+    // are newest-first; the first one's RVAs are the "previous build" used to
+    // predict locations, the last one is expected to be the built-in list.
     PatternOutcome ReconcilePatterns(OSTPlatform::DynamicLibrary::ModuleHandle module,
                                      const PatternSet& current,
                                      const std::vector<PatternSet>& baselines,

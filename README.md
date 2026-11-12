@@ -195,32 +195,50 @@ The C++ runtime provides two Lua helpers:
 
 ### Steam version compatibility
 
-OpenSteamTool no longer ships byte-pattern signatures inside the DLL. Instead, on each launch it computes the SHA-256 of `steamclient64.dll` and `steamui.dll` on disk and looks up a matching pattern file from the upstream tracker at [`OpenSteam001/steam-monitor`](https://github.com/OpenSteam001/steam-monitor) (`pattern` branch).
+OpenSteamTool needs per-build metadata for the Steam client: byte signatures / RVAs for hooked functions in `steamclient64.dll` and `steamui.dll` (`pattern` channel) and IPC method hashes (`ipc` channel). Every Steam update changes these DLLs, so metadata is keyed by the SHA-256 of each DLL.
 
-Lookup order (every launch):
+**Where metadata comes from (every launch):**
 
-1. **GitHub raw** — `https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern/...`. Canonical source.
-2. **jsDelivr CDN** — automatic fallback if GitHub raw is unreachable (connection refused / timeout / 5xx). No configuration required. Useful in regions where `raw.githubusercontent.com` is blocked but jsDelivr is reachable (e.g. mainland China).
-3. **Local cache** — `<Steam>\opensteamtool\pattern\<subdir>\<sha256>.toml`. Used **only** when remote is unreachable. The cache is overwritten after every successful remote fetch.
+1. **This repository** â€” the [`pattern`](https://github.com/matheeshapathirana/OpenSteamTool/tree/pattern) and [`ipc`](https://github.com/matheeshapathirana/OpenSteamTool/tree/ipc) branches, via GitHub raw with a jsDelivr fallback (useful where `raw.githubusercontent.com` is blocked).
+2. **The original tracker** [`OpenSteam001/steam-monitor`](https://github.com/OpenSteam001/steam-monitor) â€” last resort, in case it publishes again.
+3. **Local cache** â€” `<Steam>\opensteamtool\{pattern,ipc}\<component>\<sha256>.toml`, used when no remote source has the file.
+4. **Local derivation** â€” if nothing matches the installed build, OpenSteamTool derives the metadata itself from earlier builds' TOMLs (and a baseline built into the DLL) and writes it to the cache. See below.
 
-Remote is consulted on every launch so users automatically pick up upstream re-publications (e.g. the bot adding a new signature, or fixing an existing one) without having to clear any cache.
+A 404 from one source skips that source's mirrors and moves on to the next one.
 
-If a step returns **HTTP 404** the mirror loop stops immediately — all mirrors serve the same content, so a 404 means the upstream bot has not yet published a TOML for this Steam build. The code then falls back to the local cache if one exists; otherwise a one-shot popup appears with the unmatched DLL name, its SHA-256, the expected cache path, and the upstream URL. Only the hooks tied to that DLL are disabled — the rest of OpenSteamTool keeps working.
+**Validation.** Whatever the source, every pattern entry is checked against the loaded DLL before use: its RVA must be a real function start and its signature must match there. Invalid entries are re-derived or dropped â€” never called blindly. IPC hashes are cross-checked against the IPC wrappers in `steamclient64.dll` and corrected if they disagree.
 
-You can also drop a pattern TOML into the cache directory manually if you know the layout for a given build; the file name must be `<sha256>.toml`. The cache fallback will pick it up the next time remote is unreachable.
+**Local derivation** carries signatures forward from previous builds: exact matches (re-anchored when a function's prologue grew), and close matches only where they are unambiguous â€” near where neighbouring functions moved, or clearly better than every other function in the DLL. Functions it cannot place safely are left out; the hooks that need them are disabled and a single popup names them. Derived files start with an `# Auto-derived ...` header and carry a `# derived: ...` note per entry. Turn it off with:
 
-> A short outbound HTTPS request is performed at every launch (one per DLL: `steamclient64.dll`, `steamui.dll`). The downloaded bodies are tiny (~10 KB each) and the work runs on a worker thread, so it never blocks Steam's loader.
+```toml
+[remote]
+auto_derive = false
+```
+
+**Publishing.** The [Steam metadata workflow](.github/workflows/metadata.yml) checks Valve's client-update feed every few hours. When a new Steam build ships it downloads the DLLs, runs the same derivation (`tools/derive_check`), commits the TOMLs to the `pattern` / `ipc` branches and opens an issue listing anything that needs a signature added by hand. Users on a new build therefore normally get published metadata without deriving anything locally.
+
+You can also drop a TOML into the cache directory yourself; the file name must be `<sha256>.toml`.
+
+> A short outbound HTTPS request is performed at every launch per metadata file. The bodies are a few KB and the work runs on a worker thread, so it never blocks Steam's loader.
 
 #### Using a different mirror
 
-For most users, the built-in **GitHub -> jsDelivr** fallback is enough. To use a private mirror or intranet server, configure a full URL template. A custom mirror replaces the built-in remote sources; local cache fallback remains available.
+To use a private mirror or intranet server, configure a full URL template. A custom mirror replaces the built-in remote sources; the local cache and local derivation remain available.
 
 The template must include `{channel}`, `{component}`, and `{sha256}`. Channels currently used are `pattern` and `ipc`.
 
 ```toml
 [remote]
 url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
-# url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/matheeshapathirana/OpenSteamTool@{channel}/{component}/{sha256}.toml"
+```
+
+#### Checking derivation offline
+
+`derive_check` (build with `cmake --build build --config Release --target derive_check`) maps the Steam DLLs without running them and reports what would be derived for the installed build, compared with any cached TOML:
+
+```
+build\Release\derive_check.exe "C:\Program Files (x86)\Steam"
 ```
 
 ### Debug logging

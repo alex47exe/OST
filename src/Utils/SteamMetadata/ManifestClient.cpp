@@ -80,8 +80,7 @@ namespace ManifestClient {
 
     // ── fetch ─────────────────────────────────────────────────────
 
-    static bool FetchActive(uint64_t gid, uint64_t* outCode) {
-        const Provider& p = *g_active;
+    static bool FetchFrom(const Provider& p, uint64_t gid, uint64_t* outCode) {
         const Config::ManifestTimeouts timeouts = Config::GetManifestTimeouts();
 
         char urlLog[256];
@@ -102,6 +101,18 @@ namespace ManifestClient {
 
         if (!r.ok || r.status != 200) return false;
         return p.parse(r.body, outCode);
+    }
+
+    // The configured provider first, then every other provider in table
+    // order, so one service going offline does not break manifest downloads.
+    static bool FetchActive(uint64_t gid, uint64_t* outCode) {
+        if (FetchFrom(*g_active, gid, outCode)) return true;
+        for (const auto& p : kProviders) {
+            if (&p == g_active) continue;
+            LOG_MANIFEST_WARN("Manifest gid={} {} failed, trying {}", gid, g_active->name, p.name);
+            if (FetchFrom(p, gid, outCode)) return true;
+        }
+        return false;
     }
 
     // ── public ────────────────────────────────────────────────────

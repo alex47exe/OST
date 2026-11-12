@@ -193,7 +193,7 @@ namespace {
         SteamDiagnostics::ReportMissingMetadata({
             "IPC spec for steamclient64.dll",
             "ipc\\steamclient\\" + sha256 + ".toml",
-            "https://github.com/OpenSteam001/steam-monitor/tree/ipc/steamclient",
+            SteamDiagnostics::MetadataBrowseUrl("ipc", "steamclient"),
         });
     }
 
@@ -293,7 +293,7 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle steamclient, const std::stri
             const std::string header = std::format(
                 "# Auto-derived by OpenSteamTool {} for steamclient sha256 {}.\n"
                 "# funcHash/fencepost were read from the IPC wrappers in this DLL.\n"
-                "# This file is replaced automatically once steam-monitor publishes one.\n",
+                "# This file is replaced automatically once a published one is available.\n",
                 OPENSTEAMTOOL_VERSION, r.sha256);
             RemoteToml::WriteCache(request, r.sha256, SerializeInterfaces(ifaces, header));
         }

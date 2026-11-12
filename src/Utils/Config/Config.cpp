@@ -19,6 +19,7 @@ namespace {
         std::string remoteUrlTemplate;
         bool remoteAutoDerive = true;
         bool statsEnableApi = true;
+        std::string statsApiUrl = "https://stats.opensteamtool.com/{appid}";
         InjectionSettings injection;
         CloudSettings cloud;
     };
@@ -55,6 +56,7 @@ namespace {
         remoteUrlTemplate      = snapshot.remoteUrlTemplate;
         remoteAutoDerive       = snapshot.remoteAutoDerive;
         statsEnableApi         = snapshot.statsEnableApi;
+        statsApiUrl            = snapshot.statsApiUrl;
         injectEnabled          = snapshot.injection.enabled;
         injectLibraryX86       = snapshot.injection.libraryX86;
         injectLibraryX64       = snapshot.injection.libraryX64;
@@ -151,6 +153,12 @@ namespace {
                 if (auto val = (*stats)["enable_api"].value<bool>()) {
                     snapshot.statsEnableApi = *val;
                 }
+                if (auto val = (*stats)["api_url"].value<std::string>()) {
+                    if (val->find("{appid}") != std::string::npos)
+                        snapshot.statsApiUrl = *val;
+                    else
+                        LOG_WARN("Config: stats.api_url must contain {{appid}}; keeping default");
+                }
             }
 
             // [inject]
@@ -230,6 +238,11 @@ namespace {
     std::string GetRemoteUrlTemplate() {
         std::lock_guard lock(g_mutex);
         return remoteUrlTemplate;
+    }
+
+    std::string GetStatsApiUrl() {
+        std::lock_guard lock(g_mutex);
+        return statsApiUrl;
     }
 
     bool GetRemoteAutoDerive() {

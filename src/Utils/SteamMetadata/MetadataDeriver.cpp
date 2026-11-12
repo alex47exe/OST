@@ -445,9 +445,13 @@ PatternOutcome ReconcilePatterns(OSTPlatform::DynamicLibrary::ModuleHandle modul
     }
     if (!derive) return out;
 
-    if (current.empty()) {
-        for (const auto& b : baselines)
-            for (const auto& [key, spec] : b) needed.insert(key);
+    if (current.empty() && !baselines.empty()) {
+        // Names worth deriving: the previous build's set plus the oldest
+        // baseline (the built-in list of everything this code hooks). Names
+        // that only appear in older builds have been dropped and would just
+        // add noise; signatures from every baseline are still used below.
+        for (const auto& [key, spec] : baselines.front()) needed.insert(key);
+        for (const auto& [key, spec] : baselines.back()) needed.insert(key);
     }
     if (needed.empty()) return out;
 

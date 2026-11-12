@@ -4,6 +4,7 @@
 #include "OpenSteamToolBuildInfo.h"
 #include "Utils/Config/Config.h"
 #include "Utils/Logging/Log.h"
+#include "Utils/ProjectInfo.h"
 #include "Utils/SteamMetadata/BuiltinBaseline.h"
 #include "Utils/SteamMetadata/MetadataDeriver.h"
 #include "Utils/SteamMetadata/RemoteToml.h"
@@ -19,7 +20,7 @@
 
 
 // ---- compile-time sanity checks for FNV-1a table keys ----
-// If the steam-monitor bot uses the same algorithm these must hold.
+// The metadata publisher uses the same algorithm, so these must hold.
 static_assert(Fnv1aHash("BBuildAndAsyncSendFrame") == 0x82428E37u,
               "FNV-1a mismatch for BBuildAndAsyncSendFrame");
 static_assert(Fnv1aHash("BuildDepotDependency") == 0xC37F2D8Eu,
@@ -155,7 +156,7 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
             "# Auto-derived by OpenSteamTool {} for {} sha256 {}.\n"
             "# Entries were carried forward from earlier builds and checked against\n"
             "# function boundaries in this DLL. Not derived: {}.\n"
-            "# This file is replaced automatically once steam-monitor publishes one.\n",
+            "# This file is replaced automatically once a published one is available.\n",
             OPENSTEAMTOOL_VERSION, component, r.sha256,
             outcome.underivable.empty() ? std::string("none") : [&] {
                 std::string s;
@@ -189,8 +190,7 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
     SteamDiagnostics::ReportMissingMetadata({
         dllName + " signatures",
         std::string(kPatternChannel) + "\\" + component + "\\" + sha + ".toml",
-        "https://github.com/OpenSteam001/steam-monitor/tree/" +
-            std::string(kPatternChannel) + "/" + component,
+        SteamDiagnostics::MetadataBrowseUrl(kPatternChannel, component),
     });
     g_failedModules.insert(module);
     return false;
@@ -278,7 +278,7 @@ void ReportMissingFunctions()
         list +
         "\nHooks for these functions are disabled for this session.\n\n"
         "Please report this at:\n"
-        "https://github.com/OpenSteam001/OpenSteamTool/issues");
+        + std::string(ProjectInfo::kIssuesUrl));
 }
 
 } // namespace PatternLoader

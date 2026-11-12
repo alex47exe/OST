@@ -12,6 +12,7 @@ level = "debug"
 #   "opensteamtool" → https://manifest.opensteamtool.com/{gid}   (default)
 #   "wudrm"         → http://gmrc.wudrm.com/manifest/{gid} (recommended for China users)
 #   "steamrun"      → https://manifest.steam.run/api/manifest/{gid}
+# If the selected provider fails, the other providers are tried in the order above.
 # If <Steam>/config/lua/manifest.lua defines fetch_manifest_code(gid) or
 # fetch_manifest_code_ex(app_id, depot_id, gid), those Lua functions take
 # priority over the url setting below.
@@ -57,10 +58,12 @@ timeout_send_ms    = 10000
 timeout_recv_ms    = 10000
 
 [stats]
-# Automatically query https://stats.opensteamtool.com/{appid} for a recommended
-# SteamID when no Lua setStat(appid, "steamid") override exists.
+# Automatically query the stats API for a recommended SteamID when no Lua
+# setStat(appid, "steamid") override exists.
 # Priority: setStat > stats API when enabled and valid > hardcoded preset SteamID.
 enable_api = true
+# Stats API endpoint; must contain {appid}. The response body is a SteamID64.
+# api_url = "https://stats.opensteamtool.com/{appid}"
 
 # Additional Lua config directories (optional).
 # Files are loaded after the default <Steam>/config/lua folder.
@@ -93,12 +96,13 @@ enabled = false
 # library = "cloud_redirect.dll"
 
 [remote]
-# Optional metadata mirror. Leave unset to use GitHub with jsDelivr fallback.
+# Optional metadata mirror. Leave unset to use this project's GitHub branches
+# (jsDelivr fallback), then the original steam-monitor tracker.
 # A custom mirror replaces the built-in remote sources and must include all
 # three placeholders: {channel}, {component}, and {sha256}.
 #
 # url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
-# url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/matheeshapathirana/OpenSteamTool@{channel}/{component}/{sha256}.toml"
 #
 # When no published metadata matches the installed Steam build, OpenSteamTool
 # derives it locally from earlier builds (carried-forward signatures checked

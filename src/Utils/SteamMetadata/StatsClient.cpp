@@ -44,10 +44,12 @@ bool FetchStatSteamId(AppId_t appId, uint64_t* outSteamId) {
         }
     }
 
-    char url[128];
-    std::snprintf(url, sizeof(url), "https://stats.opensteamtool.com/%u", appId);
+    // [stats] api_url, with {appid} substituted.
+    std::string url = Config::GetStatsApiUrl();
+    if (const auto pos = url.find("{appid}"); pos != std::string::npos)
+        url.replace(pos, 7, std::to_string(appId));
 
-    auto r = OSTPlatform::Http::Execute(L"GET", url);
+    auto r = OSTPlatform::Http::Execute(L"GET", url.c_str());
     LOG_ACHIEVEMENT_INFO("Stats SteamID API status={} appid={}", r.status, appId);
 
     if (!r.ok || r.status != 200) {
