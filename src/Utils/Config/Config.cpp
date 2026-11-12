@@ -17,6 +17,7 @@ namespace {
         std::string logDir;
         std::vector<std::string> luaPaths;
         std::string remoteUrlTemplate;
+        bool remoteAutoDerive = true;
         bool statsEnableApi = true;
         InjectionSettings injection;
         CloudSettings cloud;
@@ -52,6 +53,7 @@ namespace {
         logDir                 = snapshot.logDir;
         luaPaths               = snapshot.luaPaths;
         remoteUrlTemplate      = snapshot.remoteUrlTemplate;
+        remoteAutoDerive       = snapshot.remoteAutoDerive;
         statsEnableApi         = snapshot.statsEnableApi;
         injectEnabled          = snapshot.injection.enabled;
         injectLibraryX86       = snapshot.injection.libraryX86;
@@ -139,6 +141,9 @@ namespace {
                 if (auto val = (*remote)["url_template"].value<std::string>()) {
                     snapshot.remoteUrlTemplate = *val;
                 }
+                if (auto val = (*remote)["auto_derive"].value<bool>()) {
+                    snapshot.remoteAutoDerive = *val;
+                }
             }
 
             // [stats]
@@ -225,6 +230,11 @@ namespace {
     std::string GetRemoteUrlTemplate() {
         std::lock_guard lock(g_mutex);
         return remoteUrlTemplate;
+    }
+
+    bool GetRemoteAutoDerive() {
+        std::lock_guard lock(g_mutex);
+        return remoteAutoDerive;
     }
 
     InjectionSettings GetInjectionSettings() {

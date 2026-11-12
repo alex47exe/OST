@@ -38,6 +38,7 @@ namespace Config {
     std::string GetLogDir();
     std::vector<std::string> GetLuaPaths();
     std::string GetRemoteUrlTemplate();
+    bool GetRemoteAutoDerive();
     InjectionSettings GetInjectionSettings();
     CloudSettings GetCloudSettings();
     bool GetStatsEnableApi();
@@ -59,6 +60,7 @@ namespace Config {
 
     // [remote]
     inline std::string remoteUrlTemplate;
+    inline bool remoteAutoDerive = true;
 
     // [stats]
     inline bool statsEnableApi = true;

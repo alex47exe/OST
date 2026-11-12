@@ -1,18 +1,22 @@
 #include "PatternLoader.h"
 #include "OSTPlatform/include/Memory.h"
 #include "OSTPlatform/include/Numbers.h"
+#include "OpenSteamToolBuildInfo.h"
+#include "Utils/Config/Config.h"
 #include "Utils/Logging/Log.h"
+#include "Utils/SteamMetadata/BuiltinBaseline.h"
+#include "Utils/SteamMetadata/MetadataDeriver.h"
 #include "Utils/SteamMetadata/RemoteToml.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 #include "Utils/Support/FnvHash.h"
 
 #include <filesystem>
+#include <format>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include <toml++/toml.hpp>
 
 // ---- compile-time sanity checks for FNV-1a table keys ----
 // If the steam-monitor bot uses the same algorithm these must hold.
@@ -97,47 +101,6 @@ static void* ScanModule(OSTPlatform::DynamicLibrary::ModuleHandle module,
     return nullptr;
 }
 
-// ---- TOML pattern parser ----
-
-// Section keys are hex literals like "0x82428E37"; each section is a table
-// with optional `name`, `rva` (hex string), and `sig` (IDA-style bytes).
-static PatternMap TableToPatternMap(const toml::table& tbl)
-{
-    PatternMap map;
-    map.reserve(tbl.size());
-    for (auto& [rawKey, val] : tbl) {
-        if (!val.is_table()) continue;
-        auto& sub = *val.as_table();
-
-        const auto parsedKey = OSTPlatform::Numbers::ParseHexUInt32(std::string(rawKey));
-        if (!parsedKey) continue;
-        const uint32_t hashKey = *parsedKey;
-
-        PatternEntry entry;
-        if (auto v = sub["name"].value<std::string>()) entry.name = *v;
-        if (auto v = sub["rva"].value<std::string>()) {
-            if (const auto rva = OSTPlatform::Numbers::ParseHexUInt64(*v)) {
-                entry.rva = static_cast<uintptr_t>(*rva);
-            }
-        }
-        if (auto v = sub["sig"].value<std::string>()) entry.sig = *v;
-
-        map[hashKey] = std::move(entry);
-    }
-    return map;
-}
-
-static PatternMap ParsePatternString(std::string_view body,
-                                     std::string* outError = nullptr)
-{
-    try {
-        return TableToPatternMap(toml::parse(body));
-    } catch (const toml::parse_error& e) {
-        if (outError) *outError = e.description();
-        return {};
-    }
-}
-
 // ---- popup helpers (detached threads so we never block Steam) ----
 
 // Surface a missing pattern file to the user, with enough detail to either
@@ -176,23 +139,72 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
     namespace fs = std::filesystem;
 
     // Delegate fetch + cache + mirror fallback to RemoteToml.
-    RemoteToml::Result r = RemoteToml::Fetch({
+    const RemoteToml::Request request{
         kPatternChannel,
         component,
         dllPath,
-    });
+    };
+    RemoteToml::Result r = RemoteToml::Fetch(request);
 
+    MetadataDeriver::PatternSet current;
     if (r.ok) {
         std::string parseErr;
-        PatternMap map = ParsePatternString(r.body, &parseErr);
-        if (!map.empty()) {
-            LOG_INFO("PatternLoader: loaded {} patterns for {} ({})",
-                     map.size(), component, r.fromCache ? "cache fallback" : "remote");
-            g_moduleMaps[module] = std::move(map);
-            return true;
+        current = MetadataDeriver::ParsePatternToml(r.body, &parseErr);
+        if (current.empty()) {
+            LOG_WARN("PatternLoader: TOML for {} parsed empty ({})",
+                     component, parseErr.empty() ? "no entries" : parseErr);
         }
-        LOG_WARN("PatternLoader: TOML for {} parsed empty ({})",
-                 component, parseErr.empty() ? "no entries" : parseErr);
+    }
+
+    // Validate every entry against the loaded module (a stale or mistyped RVA
+    // would otherwise be called/detoured blindly), and derive what is missing
+    // or invalid from earlier builds' metadata.
+    const bool derive = Config::GetRemoteAutoDerive();
+    std::vector<MetadataDeriver::PatternSet> baselines;
+    if (derive) {
+        for (const auto& cached : RemoteToml::ReadOtherCached(request, r.sha256)) {
+            auto set = MetadataDeriver::ParsePatternToml(cached.body);
+            if (!set.empty()) baselines.push_back(std::move(set));
+        }
+        auto builtin = MetadataDeriver::ParsePatternToml(BuiltinBaseline::Pattern(component));
+        if (!builtin.empty()) baselines.push_back(std::move(builtin));
+    }
+
+    auto outcome = MetadataDeriver::ReconcilePatterns(module, current, baselines, derive);
+    LOG_INFO("PatternLoader: {}: {} validated, {} derived, {} rejected, {} underivable",
+             component, outcome.validated, outcome.derived, outcome.rejected.size(),
+             outcome.underivable.size());
+
+    if (derive && outcome.changed && outcome.derived > 0 && !r.sha256.empty()) {
+        const std::string header = std::format(
+            "# Auto-derived by OpenSteamTool {} for {} sha256 {}.\n"
+            "# Entries were carried forward from earlier builds and checked against\n"
+            "# function boundaries in this DLL. Not derived: {}.\n"
+            "# This file is replaced automatically once steam-monitor publishes one.\n",
+            OPENSTEAMTOOL_VERSION, component, r.sha256,
+            outcome.underivable.empty() ? std::string("none") : [&] {
+                std::string s;
+                for (const auto& n : outcome.underivable) s += (s.empty() ? "" : ", ") + n;
+                return s;
+            }());
+        RemoteToml::WriteCache(request, r.sha256,
+                               MetadataDeriver::SerializePatternToml(outcome.entries, header));
+    }
+
+    if (!outcome.entries.empty()) {
+        PatternMap map;
+        for (auto& [key, spec] : outcome.entries) {
+            PatternEntry e;
+            e.name = std::move(spec.name);
+            e.rva  = spec.rva;
+            e.sig  = std::move(spec.sig);
+            map[key] = std::move(e);
+        }
+        LOG_INFO("PatternLoader: loaded {} patterns for {} ({})",
+                 map.size(), component,
+                 outcome.derived ? "locally derived" : (r.fromCache ? "cache fallback" : "remote"));
+        g_moduleMaps[module] = std::move(map);
+        return true;
     }
 
     // Total failure — popup + disable module's hooks.

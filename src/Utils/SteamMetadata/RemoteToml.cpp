@@ -4,6 +4,7 @@
 #include "Utils/Logging/Log.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -67,6 +68,12 @@ namespace {
 
         return { remoteUrlTemplate };
     }
+
+    static std::filesystem::path CacheDirFor(const Request& request)
+    {
+        const std::filesystem::path steamRoot = std::filesystem::path(request.dllPath).parent_path();
+        return steamRoot / "opensteamtool" / request.channel / request.component;
+    }
 } // namespace
 
 Result Fetch(const Request& request)
@@ -89,8 +96,7 @@ Result Fetch(const Request& request)
              request.channel, request.component, out.sha256, hashMs);
 
     // 2. Cache path & dir.
-    fs::path steamRoot = fs::path(request.dllPath).parent_path();
-    fs::path cacheDir  = steamRoot / "opensteamtool" / request.channel / request.component;
+    fs::path cacheDir  = CacheDirFor(request);
     fs::path cachePath = cacheDir / (out.sha256 + ".toml");
     const std::string cachePathText = cachePath.string();
 
@@ -175,6 +181,71 @@ Result Fetch(const Request& request)
              request.channel, request.component,
              lastUrl.empty() ? "<none>" : lastUrl, http.status);
     return out;
+}
+
+std::vector<CachedBody> ReadOtherCached(const Request& request,
+                                        std::string_view excludeSha256,
+                                        size_t maxCount)
+{
+    namespace fs = std::filesystem;
+    std::vector<std::pair<fs::file_time_type, fs::path>> files;
+
+    std::error_code ec;
+    for (fs::directory_iterator it(CacheDirFor(request), ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path& p = it->path();
+        if (p.extension() != ".toml") continue;
+        const std::string stem = p.stem().string();
+        if (stem.size() != 64 || stem == excludeSha256) continue;
+        std::error_code tec;
+        const auto t = fs::last_write_time(p, tec);
+        if (tec) continue;
+        files.emplace_back(t, p);
+    }
+    std::sort(files.begin(), files.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::vector<CachedBody> out;
+    for (const auto& [t, p] : files) {
+        if (out.size() >= maxCount) break;
+        std::ifstream ifs(p, std::ios::binary);
+        if (!ifs) continue;
+        std::string buf((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        if (buf.empty()) continue;
+        out.push_back({p.stem().string(), std::move(buf)});
+    }
+    return out;
+}
+
+bool WriteCache(const Request& request, std::string_view sha256, std::string_view body)
+{
+    namespace fs = std::filesystem;
+    if (sha256.empty() || body.empty()) return false;
+
+    const fs::path dir = CacheDirFor(request);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+
+    const fs::path finalPath = dir / (std::string(sha256) + ".toml");
+    const fs::path tmpPath   = dir / (std::string(sha256) + ".toml.tmp");
+    {
+        std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!ofs) {
+            LOG_WARN("RemoteToml({}/{}): could not open {} for writing",
+                     request.channel, request.component, tmpPath.string());
+            return false;
+        }
+        ofs.write(body.data(), static_cast<std::streamsize>(body.size()));
+        if (!ofs) return false;
+    }
+    fs::rename(tmpPath, finalPath, ec);
+    if (ec) {
+        LOG_WARN("RemoteToml({}/{}): could not replace {} ({})",
+                 request.channel, request.component, finalPath.string(), ec.message());
+        fs::remove(tmpPath, ec);
+        return false;
+    }
+    LOG_INFO("RemoteToml({}/{}): wrote {}", request.channel, request.component, finalPath.string());
+    return true;
 }
 
 } // namespace RemoteToml

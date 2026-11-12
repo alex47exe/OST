@@ -112,6 +112,7 @@ add_library(OpenSteamTool SHARED
     Utils/Logging/Log.cpp
     Utils/SteamMetadata/IPCLoader.cpp
     Utils/SteamMetadata/ManifestClient.cpp
+    Utils/SteamMetadata/MetadataDeriver.cpp
     Utils/SteamMetadata/PatternLoader.cpp
     Utils/SteamMetadata/RemoteToml.cpp
     Utils/SteamMetadata/StatsClient.cpp
@@ -162,6 +163,18 @@ target_link_libraries(OpenSteamTool PRIVATE
     tomlplusplus::tomlplusplus
     $<$<CONFIG:Debug>:spdlog::spdlog>
 )
+
+# ---------------------------------------------------------------------------
+# derive_check - developer tool: runs the local metadata deriver against a
+# Steam install offline (DLLs mapped, never executed) and compares the result
+# with cached TOMLs. Not shipped; build with --target derive_check.
+# ---------------------------------------------------------------------------
+add_executable(derive_check EXCLUDE_FROM_ALL
+    "${OPENSTEAMTOOL_TOOLS_DIR}/derive_check/derive_check.cpp"
+    Utils/SteamMetadata/MetadataDeriver.cpp
+)
+target_include_directories(derive_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(derive_check PRIVATE OSTPlatform tomlplusplus::tomlplusplus)
 
 # Logging is compiled in only for Debug; Release reduces LOG_* to no-ops.
 target_compile_definitions(OpenSteamTool PRIVATE
