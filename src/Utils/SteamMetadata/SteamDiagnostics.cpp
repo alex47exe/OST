@@ -4,10 +4,13 @@
 #include "OSTPlatform/include/DynamicLibrary.h"
 #include "OSTPlatform/include/Hash.h"
 #include "Utils/Logging/Log.h"
+#include "Utils/ProjectInfo.h"
 
 #include <cstdint>
+#include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace SteamDiagnostics {
 
@@ -23,6 +26,9 @@ namespace {
     };
 
     Snapshot g_snapshot;
+
+    // Filled and drained on the init worker thread only.
+    std::vector<MissingMetadata> g_missingMetadata;
 
     static std::string DetectSteamBuildID()
     {
@@ -54,11 +60,11 @@ namespace {
     static std::string AppendSnapshot(std::string message)
     {
     message +=
-        "\n\nSteam 诊断信息：\n"
-        "  OpenSteamTool 版本：" + g_snapshot.openSteamToolVersion + "\n"
-        "  构建 ID：" + g_snapshot.buildID + "\n"
-        "  steamclient64.dll SHA：" + g_snapshot.steamclientSha256 + "\n"
-        "  steamui.dll SHA：" + g_snapshot.steamUISha256;
+        "\n\nSteam diagnostics:\n"
+        "  OpenSteamTool version: " + g_snapshot.openSteamToolVersion + "\n"
+        "  Build ID: " + g_snapshot.buildID + "\n"
+        "  steamclient64.dll SHA: " + g_snapshot.steamclientSha256 + "\n"
+        "  steamui.dll SHA: " + g_snapshot.steamUISha256;
         return message;
     }
 
@@ -101,6 +107,46 @@ void ShowWarning(std::string title, std::string message)
                  message = AppendSnapshot(std::move(message))]() {
         OSTPlatform::Dialog::ShowWarning(title, message);
     }).detach();
+}
+
+void ReportMissingMetadata(MissingMetadata entry)
+{
+    g_missingMetadata.push_back(std::move(entry));
+}
+
+void ShowMissingMetadataSummary()
+{
+    if (g_missingMetadata.empty()) return;
+
+    std::string missing;
+    std::string paths;
+    std::string upstream;
+    for (const auto& entry : g_missingMetadata) {
+        missing += "  - " + entry.description + "\n";
+        if (!entry.cachePath.empty())
+            paths += "       <Steam>\\opensteamtool\\" + entry.cachePath + "\n";
+        if (!entry.upstreamUrl.empty())
+            upstream += "       " + entry.upstreamUrl + "\n";
+    }
+    g_missingMetadata.clear();
+
+    ShowWarning(
+        "OpenSteamTool - Missing Steam metadata",
+        "OpenSteamTool has no compatibility data for this Steam build.\n\n"
+        "Missing:\n" + missing + "\n"
+        "Hooks that depend on the missing files are disabled for this session; "
+        "everything else keeps working.\n\n"
+        "You can:\n"
+        "Option 1: download the Fluent Steam Lua library manager from the GitHub link below\n"
+        "https://github.com/huanyuejue/Fluent-Steam-Lua\n"
+        "In the tool panel at the bottom right, use the OpenSteamTool management panel to fetch all required TOML files with one click\n"
+        "\n\n"
+        "Option 2: manually place matching TOML files at:\n" + paths +
+        "\n"
+        "Upstream URL:\n" + upstream +
+        "\n"
+        "If the problem persists, report it with the diagnostics below at:\n"
+        + std::string(ProjectInfo::kIssuesUrl));
 }
 
 } // namespace SteamDiagnostics

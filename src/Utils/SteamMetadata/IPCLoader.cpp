@@ -1,10 +1,19 @@
 #include "IPCLoader.h"
 #include "IPCMessages.gen.h"
+#include "OpenSteamToolBuildInfo.h"
 #include "OSTPlatform/include/Numbers.h"
+#include "Utils/Config/Config.h"
 #include "Utils/Logging/Log.h"
+#include "Utils/SteamMetadata/BuiltinBaseline.h"
+#include "Utils/SteamMetadata/MetadataDeriver.h"
 #include "Utils/SteamMetadata/RemoteToml.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
+#include "Utils/ProjectInfo.h"
 
+#include <algorithm>
+#include <format>
+#include <iterator>
+#include <set>
 #include <unordered_map>
 #include <utility>
 
@@ -137,38 +146,72 @@ namespace {
                 ParseHexU32(*v, m.fencepost);
             if (auto v = mtbl["argc"].value<int64_t>())
                 m.argc = static_cast<uint32_t>(*v);
+            if (auto v = mtbl["wrapper_rva"].value<std::string>())
+                ParseHexU32(*v, m.wrapperRva);
+            if (auto v = mtbl["method_index"].value<int64_t>())
+                m.methodIndex = static_cast<uint32_t>(*v);
             out.methods.push_back(std::move(m));
         }
         return true;
     }
 
-    static void ShowMissingPopup(const std::string& sha256)
+    // Parse a whole IPC TOML into interfaces (invalid tables are skipped).
+    static std::vector<Interface> ParseInterfaces(std::string_view body, std::string* outError = nullptr)
     {
-        SteamDiagnostics::ShowWarning(
-            "OpenSteamTool - 缺少 IPC 描述文件",
-            "OpenSteamTool：找不到 IPC 描述文件。\n\n"
-            "本会话 IPC 拦截已停用，基于特征码的 hook 不受影响。\n\n"
-            "你可以：\n"
-            "方法1：前往下方 Github 链接下载 Fluent Steam Lua 入库管理工具\n"
-            "https://github.com/huanyuejue/Fluent-Steam-Lua\n"
-            "在软件右下角工具面板的 OpenSteamTool 管理面板中一键补齐所需 Toml 文件\n"
-            "\n\n"
-            "方法2：手动去 Github 上游获取一份匹配的 TOML 放到本地的：\n"
-            "<Steam>\\opensteamtool\\ipc\\steamclient\\" + sha256 + ".toml\n"
-            "\n\n"
-            "上游地址：\n"
-            "https://github.com/huanyuejue/steam-monitor/tree/main/ipc/steamclient\n"
-            "\n\n"
-            "如仍无法解决，可按下方诊断信息反馈至：\n"
-            "https://github.com/huanyuejue/OpenSteamTool/issues");
+        std::vector<Interface> out;
+        toml::table root;
+        try {
+            root = toml::parse(body);
+        } catch (const toml::parse_error& e) {
+            if (outError) *outError = e.description();
+            LOG_WARN("IPCLoader: TOML parse error: {}", e.description());
+            return out;
+        }
+        for (auto& [key, val] : root) {
+            if (!val.is_table()) continue;
+            Interface iface;
+            if (ParseInterfaceTable(key.str(), *val.as_table(), iface))
+                out.push_back(std::move(iface));
+        }
+        return out;
+    }
+
+    static std::string SerializeInterfaces(const std::vector<Interface>& ifaces, std::string_view header)
+    {
+        std::string out(header);
+        for (const auto& iface : ifaces) {
+            if (!out.empty()) out += '\n';
+            out += std::format("[{}]\ninterface_id = {}\n", iface.name, static_cast<int>(iface.id));
+            if (iface.vtableRva) out += std::format("vtable_rva = \"0x{:X}\"\n", iface.vtableRva);
+            for (const auto& m : iface.methods) {
+                out += std::format("\n[{}.{}]\n", iface.name, m.name);
+                if (m.methodIndex) out += std::format("method_index = {}\n", m.methodIndex);
+                out += std::format("funcHash = \"0x{:08X}\"\n", m.funcHash);
+                if (m.wrapperRva) out += std::format("wrapper_rva = \"0x{:X}\"\n", m.wrapperRva);
+                out += std::format("fencepost = \"0x{:08X}\"\n", m.fencepost);
+                out += std::format("argc = {}\n", m.argc);
+            }
+        }
+        return out;
+    }
+
+    // Queue the miss for the single summary popup shown after all loaders ran.
+    static void ReportMissing(const std::string& sha256)
+    {
+        SteamDiagnostics::ReportMissingMetadata({
+            "IPC description for steamclient64.dll",
+            "ipc\\steamclient\\" + sha256 + ".toml",
+            ProjectInfo::MetadataBrowseUrl("ipc", "steamclient"),
+        });
     }
 
 } // namespace
 
 constexpr const char* kIPCChannel = "ipc";
 
-// 必需的接口表：我们的 handler 全在这两个下面。缺任何一个等于 IPC 票据层全灭，
-// 必须当失败处理，不能当成功糊弄过去（实测：串台的 pattern 文件会导致 0 方法 + 静默 54）。
+// Required interface tables: all our handlers live under these two. Missing either one means the whole
+// IPC ticket layer is gone, so it must be treated as a failure and never papered over as success
+// (observed: a cross-wired pattern file produces 0 methods + a silent 54).
 constexpr const char* kRequiredInterfaces[] = { "IClientUser", "IClientUtils" };
 
 static bool HasRequiredInterfaces()
@@ -179,88 +222,163 @@ static bool HasRequiredInterfaces()
     return true;
 }
 
-// TryLoadOnce 结果分三类：Ok 直接用；Retryable（缓存有内容但坏）值得删缓存重下一次；
-// Fatal（下载失败/远端内容坏）重下也没用，直接大声失败。绝不无脑重试，避免离线时
-// 启动路径上付双倍网络超时。
-enum class TryResult { Ok, Retryable, Fatal };
+// One fetch+parse pass. A cached file that parses but lacks the required
+// interfaces is worth dropping and refetching once; a download failure or bad
+// remote content is not, so it fails loudly without paying a second timeout.
+struct FetchOutcome {
+    RemoteToml::Result result;
+    std::vector<Interface> ifaces;
+    std::string parseErr;
+};
 
-static TryResult TryLoadOnce(const std::string& steamclientPath, std::string& sha256, bool& fromCache, bool& allNotFound)
+static FetchOutcome FetchOnce(const RemoteToml::Request& request)
 {
-    RemoteToml::Result r = RemoteToml::Fetch({
-        kIPCChannel,
-        "steamclient",
-        steamclientPath,
-    });
-    sha256 = r.sha256;
-    fromCache = r.fromCache;
-    allNotFound = r.allNotFound;
-
-    if (!r.ok) return TryResult::Fatal;
-
-    toml::table root;
-    try {
-        root = toml::parse(r.body);
-    } catch (const toml::parse_error& e) {
-        LOG_WARN("IPCLoader: TOML parse error: {}", e.description());
-        // 缓存截断才值得重下；远端坏内容重下也一样。
-        return fromCache ? TryResult::Retryable : TryResult::Fatal;
-    }
-
-    for (auto& [key, val] : root) {
-        if (!val.is_table()) continue;
-        Interface iface;
-        if (!ParseInterfaceTable(key.str(), *val.as_table(), iface)) continue;
-
-        g_registry.Add(std::move(iface));
-    }
-
-    if (!HasRequiredInterfaces()) {
-        // 远端坏内容重下也没用；只有缓存串台才值得自愈。
-        return fromCache ? TryResult::Retryable : TryResult::Fatal;
-    }
-    return TryResult::Ok;
+    FetchOutcome out;
+    out.result = RemoteToml::Fetch(request);
+    if (out.result.ok)
+        out.ifaces = ParseInterfaces(out.result.body, &out.parseErr);
+    return out;
 }
 
-bool Load(const std::string& steamclientPath)
+static bool HasRequiredInterfacesIn(const std::vector<Interface>& ifaces)
+{
+    for (const char* name : kRequiredInterfaces) {
+        const bool found = std::any_of(ifaces.begin(), ifaces.end(),
+                                       [name](const Interface& i) { return i.name == name; });
+        if (!found) return false;
+    }
+    return true;
+}
+
+bool Load(OSTPlatform::DynamicLibrary::ModuleHandle steamclient, const std::string& steamclientPath)
 {
     g_registry.Clear();
 
-    std::string sha256;
-    bool fromCache = false;
-    bool allNotFound = false;
-    const TryResult first = TryLoadOnce(steamclientPath, sha256, fromCache, allNotFound);
-    if (first == TryResult::Ok) {
-        LOG_INFO("IPCLoader: loaded {} methods across {} interfaces ({})",
-                 MethodCount(), InterfaceCount(),
-                 fromCache ? "cache" : "remote");
-        return true;
+    const RemoteToml::Request request{ kIPCChannel, "steamclient", steamclientPath };
+    FetchOutcome fetched = FetchOnce(request);
+
+    // Self-heal only when the cache is cross-wired: drop it and refetch once (upstream currently serves the right format, curing it in one go).
+    // Download failure / bad remote content will not improve by refetching, so fail loudly instead of wasting startup time.
+    // Retry only once, to avoid a download loop.
+    if (fetched.result.ok && fetched.result.fromCache && !HasRequiredInterfacesIn(fetched.ifaces)) {
+        LOG_WARN("IPCLoader: parsed spec missing required interfaces, dropping stale cache and refetching once");
+        RemoteToml::Invalidate(request);
+        fetched = FetchOnce(request);
     }
 
-    // 自愈仅当缓存串台：删掉重下一次（上游当前给的就是对的格式，一次根治）。
-    // 下载失败/远端内容坏重下也没用，直接大声失败，不浪费启动时间。
-    // 只重试一次，避免下载循环。
-    if (first == TryResult::Retryable) {
-        LOG_WARN("IPCLoader: parsed spec missing required interfaces, dropping stale cache and refetching once");
-        RemoteToml::Invalidate({ kIPCChannel, "steamclient", steamclientPath });
-        g_registry.Clear();
-        if (TryLoadOnce(steamclientPath, sha256, fromCache, allNotFound) == TryResult::Ok) {
-            LOG_INFO("IPCLoader: self-heal ok, loaded {} methods across {} interfaces ({})",
-                     MethodCount(), InterfaceCount(),
-                     fromCache ? "cache" : "remote");
-            return true;
+    size_t corrected = 0;
+    size_t added = 0;
+    if (Config::GetRemoteAutoDerive()) {
+        bool changed = false;
+
+        // Methods we know about: the fetched file, earlier builds, built-in.
+        std::vector<std::vector<Interface>> sources;
+        sources.push_back(fetched.ifaces);
+        for (const auto& cached : RemoteToml::ReadOtherCached(request, fetched.result.sha256))
+            sources.push_back(ParseInterfaces(cached.body));
+        sources.push_back(ParseInterfaces(BuiltinBaseline::kSteamclientIpc));
+
+        std::vector<MetadataDeriver::IpcMethodRequest> wanted;
+        std::unordered_map<std::string, uint32_t> argcOf;   // "Iface.Method" -> argc
+        std::set<std::string> seen;
+        for (const auto& src : sources) {
+            for (const auto& iface : src) {
+                for (const auto& m : iface.methods) {
+                    const std::string id = iface.name + "." + m.name;
+                    if (!seen.insert(id).second) continue;
+                    wanted.push_back({iface.name, m.name});
+                    argcOf[id] = m.argc;
+                }
+            }
+        }
+
+        for (const auto& d : MetadataDeriver::DeriveIpcMethods(steamclient, wanted)) {
+            auto ifIt = std::find_if(fetched.ifaces.begin(), fetched.ifaces.end(),
+                                     [&](const Interface& i) { return i.name == d.iface; });
+            if (ifIt == fetched.ifaces.end()) {
+                const auto id = EIPCInterfaceFromName(d.iface);
+                if (!id) continue;
+                Interface fresh;
+                fresh.id = *id;
+                fresh.name = d.iface;
+                fetched.ifaces.push_back(std::move(fresh));
+                ifIt = std::prev(fetched.ifaces.end());
+            }
+            if (d.vtableRva && ifIt->vtableRva != d.vtableRva) {
+                ifIt->vtableRva = d.vtableRva;
+                changed = true;
+            }
+
+            auto mIt = std::find_if(ifIt->methods.begin(), ifIt->methods.end(),
+                                    [&](const Method& m) { return m.name == d.method; });
+            if (mIt == ifIt->methods.end()) {
+                Method m;
+                m.interfaceID = ifIt->id;
+                m.name = d.method;
+                m.funcHash = d.funcHash;
+                m.fencepost = d.fencepost;
+                m.argc = argcOf[d.iface + "." + d.method];
+                m.wrapperRva = d.wrapperRva;
+                m.methodIndex = d.methodIndex;
+                ifIt->methods.push_back(std::move(m));
+                ++added;
+                changed = true;
+                continue;
+            }
+            if (mIt->funcHash != d.funcHash || mIt->fencepost != d.fencepost) {
+                LOG_WARN("IPCLoader: {}::{} metadata disagrees with steamclient "
+                         "(hash 0x{:08X} -> 0x{:08X}, fencepost 0x{:08X} -> 0x{:08X}); using derived values",
+                         d.iface, d.method, mIt->funcHash, d.funcHash, mIt->fencepost, d.fencepost);
+                mIt->funcHash = d.funcHash;
+                mIt->fencepost = d.fencepost;
+                ++corrected;
+                changed = true;
+            }
+            if (mIt->wrapperRva != d.wrapperRva || mIt->methodIndex != d.methodIndex) {
+                mIt->wrapperRva = d.wrapperRva;
+                mIt->methodIndex = d.methodIndex;
+                changed = true;
+            }
+        }
+
+        if (changed && !fetched.result.sha256.empty()) {
+            const std::string header = std::format(
+                "# Auto-derived by OpenSteamTool {} for steamclient sha256 {}.\n"
+                "# funcHash/fencepost were read from the IPC wrappers in this DLL.\n"
+                "# This file is replaced automatically once upstream publishes one.\n",
+                OPENSTEAMTOOL_VERSION, fetched.result.sha256);
+            RemoteToml::WriteCache(request, fetched.result.sha256,
+                                   SerializeInterfaces(fetched.ifaces, header));
         }
     }
 
-    // 大声失败：缺文件就弹窗，不静默。
-    // 0 方法还当成功是玄学 54 的根源，绝不再静默。
-    if (allNotFound) {
-        LOG_ERROR("IPCLoader: IPC spec not published upstream, IPC interception disabled for this session");
-    } else {
-        LOG_ERROR("IPCLoader: IPC spec download failed (network or bad upstream content), "
-                  "IPC interception disabled for this session; will retry next launch");
+    for (auto& iface : fetched.ifaces) g_registry.Add(std::move(iface));
+
+    if (MethodCount() == 0 || !HasRequiredInterfaces()) {
+        // Fail loudly: show a popup when the file is missing, never stay silent.
+        // Treating 0 methods as success is the root cause of the mysterious 54; never stay silent again.
+        if (!fetched.result.ok) {
+            if (fetched.result.allNotFound) {
+                LOG_ERROR("IPCLoader: IPC spec not published upstream, IPC interception disabled for this session");
+            } else {
+                LOG_ERROR("IPCLoader: IPC spec download failed (network or bad upstream content), "
+                          "IPC interception disabled for this session; will retry next launch");
+            }
+        } else {
+            LOG_ERROR("IPCLoader: IPC spec is missing required interfaces, IPC interception disabled for this session");
+        }
+        ReportMissing(fetched.result.sha256.empty() ? "(hash failed)" : fetched.result.sha256);
+        return false;
     }
-    ShowMissingPopup(sha256.empty() ? "(hash failed)" : sha256);
-    return false;
+
+    const char* source = !fetched.result.ok ? "locally derived"
+                       : fetched.result.fromCache ? "cache" : "remote";
+    std::string extra;
+    if (corrected) extra += std::format(", {} corrected", corrected);
+    if (added) extra += std::format(", {} derived", added);
+    LOG_INFO("IPCLoader: loaded {} methods across {} interfaces ({}{})",
+             MethodCount(), InterfaceCount(), source, extra);
+    return true;
 }
 
 const Method* Find(EIPCInterface interfaceID, uint32_t funcHash)

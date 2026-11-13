@@ -9,6 +9,7 @@
 #include "Utils/Tickets/LegacyCDKey.h"
 #include "Utils/Support/FnvHash.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
+#include "OSTPlatform/include/Memory.h"
 #include <atomic>
 #include <chrono>
 #include <excpt.h>
@@ -61,20 +62,24 @@ namespace {
         return "?";
     }
 
-    // ── CNetPacket 字段自适应 ─────────────────────────────
-    // 收包路径的 pubData 不是直接参数，是从包对象里按偏移抠出来的；
-    // 新构建一改包对象布局，旧偏移抠出来的就是野指针，UnpackRaw 里直接崩。
-    // 所以改成运行时自适应：拿 pPacket 按候选偏移扫，
-    // 找满足“指针可读 + 头 4 字节带 proto 标志 + 长度合理”的 (data,len) 对，
-    // 找到就缓存本会话。找不到就直通，绝不碰。
-    // legacy 偏移放第一位：已验证构建一次命中，热路径零影响。
+    // ── CNetPacket field adaptation ─────────────────────────────
+    // On the receive path pubData is not a direct argument; it is carved out of the packet object by offset;
+    // a new build changes the packet object layout, so the old offset yields a wild pointer and crashes right inside UnpackRaw.
+    // So it is now adaptive at runtime: scan pPacket over candidate offsets,
+    // looking for the (data,len) pair that satisfies "pointer readable + first 4 bytes carry the proto flag + plausible length",
+    // and cache it for this session once found. If not found, pass through and never touch it.
+    // The legacy offset comes first: it hits on the first try on verified builds, with zero impact on the hot path.
     struct PacketFieldLayout { uint32 dataOff = 8; uint32 sizeOff = 16; };
     static PacketFieldLayout g_packetLayout;
     static std::atomic<bool> g_packetLayoutReady{false};
     static std::mutex g_packetLayoutMutex;
 
-    // SEH 里只放 POD + memcpy，不放任何带析构的东西，吞了异常直接返回 false。
+    // Only POD + memcpy inside the SEH block, nothing with a destructor; swallow the exception and return false directly.
+    // Readability is checked first so a shifted layout fails cleanly instead of relying on SEH alone.
     static bool ProbePacketFields(const CNetPacket* p, uint32 dataOff, uint32 sizeOff) {
+        if (!OSTPlatform::Memory::IsReadable(
+                reinterpret_cast<const uint8*>(p) + dataOff, sizeof(uint8*) + sizeof(uint32)))
+            return false;
         __try {
             const uint8* base = reinterpret_cast<const uint8*>(p);
             uint8* data = nullptr;
@@ -82,6 +87,7 @@ namespace {
             memcpy(&data, base + dataOff, sizeof(data));
             memcpy(&size, base + sizeOff, sizeof(size));
             if (!data || size < sizeof(MsgHdr) || size > kMaxPacketSize) return false;
+            if (!OSTPlatform::Memory::IsReadable(data, sizeof(MsgHdr))) return false;
             uint32 eMsg = 0;
             memcpy(&eMsg, data, sizeof(eMsg));
             if (!(eMsg & kMsgHdrProtoFlag)) return false;
@@ -96,16 +102,16 @@ namespace {
         if (!p) return false;
         std::lock_guard<std::mutex> lock(g_packetLayoutMutex);
         if (g_packetLayoutReady.load(std::memory_order_relaxed)) return true;
-        // legacy 优先：已验证构建一次命中；顺移后的新布局由候选位扫出来。
+        // legacy first: it hits on the first try on verified builds; a shifted new layout is found by scanning the candidates.
         static const uint32 kDataOffCandidates[] = {8, 16, 24, 32, 40};
         for (const uint32 dOff : kDataOffCandidates) {
-            const uint32 sOff = dOff + 8;  // len 紧跟 ptr，和编码进默认值的 legacy 配对一致
+            const uint32 sOff = dOff + 8;  // len follows ptr, matching the legacy pairing baked into the defaults
             if (ProbePacketFields(p, dOff, sOff)) {
                 g_packetLayout.dataOff = dOff;
                 g_packetLayout.sizeOff = sOff;
                 g_packetLayoutReady.store(true, std::memory_order_release);
-                LOG_NETPACKET_INFO("CNetPacket layout resolved: dataOff={} sizeOff={}",
-                                   dOff, sOff);
+                LOG_NETPACKET_INFO("CNetPacket layout resolved: dataOff={} sizeOff={} (header bias +{})",
+                                   dOff, sOff, dOff - 8);
                 return true;
             }
         }
@@ -135,8 +141,8 @@ namespace {
                           EMsg& eMsg, const uint8*& pHdr, uint32& cbHdr,
                           const uint8*& pBody, uint32& cbBody)
     {
-        // 上限对齐包池假设（收发两条替换路径都按 kMaxPacketSize 开池）：
-        // 野 size 直接拒，绝不往下算偏移读内存。
+        // The limit matches the packet pool assumption (both the send and receive replacement paths size their pools by kMaxPacketSize):
+        // a bogus size is rejected outright; no offset is ever computed past it to read memory.
         if (!data || size < sizeof(MsgHdr) || size > kMaxPacketSize) {
         fail:
             eMsg = static_cast<EMsg>(0);
@@ -543,14 +549,15 @@ namespace Hooks_NetPacket_ETicket {
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_FamilySharing {
 
-    // 家庭共享的进出方向一概不干预，交给 Steam 按原生规则处理。
-    // 曾经在这里抹掉出借方归属、清空运行列表、丢弃锁库与停玩通知，试图让
-    // 借用方不受共享名额限制。实测那套做法改不动服务器的账：服务器按自己
-    // 记录的许可与占用判定，客户端说什么它都不采信，一轮倒计时走完照样踢线，
-    // 反而因为上报数据和它的账对不上，把原本的软提醒升级成了断开会话。
-    // 现在只保留观测，不改任何内容：占用名额、到期收回都是共享本来的行为。
+    // Family Sharing traffic is left untouched in either direction; Steam handles it by its native rules.
+    // This used to erase the lender's ownership, clear the running list, and drop library locks and stop-playing
+    // notifications, trying to free the borrower from the sharing slot limit. In practice that never moved the
+    // server's books: the server decides from the license and occupancy it records, ignores whatever the client
+    // says, and still kicks the session once a countdown completes; worse, because the reported data no longer
+    // matched its books, what was a soft reminder escalated into a session disconnect.
+    // Now it is observation only, nothing is modified: occupying the slot and reclaiming on expiry are native.
 
-    // 停玩通知里写着要停哪个 AppId、归属给谁、还剩多少秒，落盘便于排查。
+    // The stop-playing notification says which AppId to stop, who owns it, and how many seconds are left; logging it helps diagnosis.
     void LogStopPlaying(const uint8* pBody, uint32 cbBody)
     {
         CMsgClientSharedLibraryStopPlaying msg;
@@ -559,8 +566,8 @@ namespace Hooks_NetPacket_FamilySharing {
             return;
         }
 
-        // 正常一次只有一两条，这里仍然设上限：包由服务端给出，
-        // 万一内容异常也不该让日志字符串无界膨胀。
+        // Normally there are only one or two entries; the cap stays anyway: the packet comes from the server,
+        // and even if the content is malformed the log string should never grow without bound.
         constexpr int kMaxLogged = 8;
         std::string detail;
         for (int i = 0; i < msg.stop_apps_size() && i < kMaxLogged; ++i) {
@@ -577,7 +584,7 @@ namespace Hooks_NetPacket_FamilySharing {
                            msg.has_seconds_left() ? msg.seconds_left() : -1, detail);
     }
 
-    // 运行列表只记录不修改，用于确认服务器对占用名额的判定。
+    // The running list is logged, never modified, to confirm how the server judges slot occupancy.
     void LogRunningApps(const uint8* pBody, uint32 cbBody)
     {
         CFamilyGroupsClient_NotifyRunningApps_Notification notify;
@@ -604,7 +611,7 @@ namespace Hooks_NetPacket_Manifest {
 
     std::unordered_map<uint64, std::shared_future<uint64>> g_CodeFutures;
     std::mutex g_CodeMutex;
-    // 等待时长为取码预算加 1 秒，带回退的慢应答仍能生效。
+    // The wait is the code-fetch budget plus 1 s, so slow responses with fallback still take effect.
     constexpr uint32 kMaxWaitMs = ManifestClient::kFetchBudgetMs + 1000;
 
     bool HandleSend(const uint8* pBody, uint32 cbBody,
@@ -666,7 +673,7 @@ namespace Hooks_NetPacket_Manifest {
             future = it->second;
             g_CodeFutures.erase(it); // Always clean up immediately
         }
-        // 等待上限覆盖取码预算，带回退的慢应答仍能生效
+        // The wait cap covers the code-fetch budget, so slow responses with fallback still take effect
         auto status = future.wait_for(std::chrono::milliseconds(kMaxWaitMs));
         if (status != std::future_status::ready) {
             LOG_MANIFEST_WARN("GetManifestRequestCode recv: HTTP timed out for jobid={}", jobId);
@@ -1075,8 +1082,8 @@ namespace Hooks_NetPacket_OnlineFix {
         const bool broadcast = Hooks_NetPacket_RichPresence::BroadcastEnabled();
 
         bool patched = false;
-        // 采用独立标记跟踪广播重写状态：480 那条已经改写过名称之后，
-        // 就不再走下面按 RichPresence 重写游戏名的分支。
+        // A separate flag tracks the broadcast rewrite state: once the 480 entry has had its name rewritten,
+        // we no longer fall into the branch below that rewrites the game name from RichPresence.
         bool didBroadcastRewrite = false;
         for (int i = 0; i < msg.games_played_size(); ++i) {
             auto* game = msg.mutable_games_played(i);
@@ -1086,8 +1093,8 @@ namespace Hooks_NetPacket_OnlineFix {
             // Fill game_extra_info with the real game name.
             if (broadcast && appid == kOnlineFixAppId) {
                 AppId_t realAppId = Hooks_Misc::ResolveAppId();
-                // 只排除占位值，不再要求 appid 在 Lua 名单里：正版拥有的游戏
-                // 加 -onlinefix 联机时同样要显示游戏名，否则好友侧只看到 480。
+                // Only placeholder values are excluded; the appid no longer has to be in the Lua allowlist: a
+                // legitimately owned game launched with -onlinefix still has to show its name, or friends only see 480.
                 if (realAppId && realAppId != kOnlineFixAppId) {
                     std::string name = Hooks_Misc::GetGameNameByAppID(realAppId);
                     if (!name.empty()) {
@@ -1104,9 +1111,9 @@ namespace Hooks_NetPacket_OnlineFix {
         // Rich Presence: rewrite topmost unowned game to use the first
         // available shortcut's game_id so the server broadcasts it as a
         // non-Steam game. Falls back to 480 if no shortcuts registered.
-        // 这一段排在家庭共享处理之前，优先级更高：用户开了好友播报就按播报走，
-        // 改完 480 之后后面的分支读到的是新值，自然不会再动它。
-        // 没开播报时这里整体跳过，家庭共享 + lua 才会落到专用分支改替代 id。
+        // This block runs before the Family Sharing handling and takes priority: with friend broadcast on, the
+        // broadcast wins; after the 480 rewrite the later branches read the new value and leave it alone.
+        // With broadcast off the whole block is skipped, so only Family Sharing + lua reaches the substitute-id branch.
         if (broadcast && !didBroadcastRewrite) {
             AppId_t trackedId = Hooks_NetPacket_RichPresence::g_PlayingAppId;
             if (trackedId != 0 && trackedId != kOnlineFixAppId && msg.games_played_size() > 0) {
@@ -1120,8 +1127,8 @@ namespace Hooks_NetPacket_OnlineFix {
                         topGame->set_game_id(kOnlineFixAppId);
                     }
                     topGame->set_game_extra_info(name);
-                    // 重写后的栈顶直接清空 owner，模拟非 Steam 游戏上报形态，
-                    // 兼顾服务器广播与出借方库免锁定。
+                    // Clear owner on the rewritten top entry to mimic how a non-Steam game reports itself,
+                    // covering both the server broadcast and keeping the lender's library unlocked.
                     topGame->clear_owner_id();
                     patched = true;
                     didBroadcastRewrite = true;
@@ -1130,35 +1137,35 @@ namespace Hooks_NetPacket_OnlineFix {
             }
         }
 
-        // 家庭共享相关的上报处理，按「lua 里有没有」和「Steam 有没有把它当
-        // 借来的」两个条件分成四种情况：
+        // Family Sharing report handling, split into four cases by two conditions:
+        // "is it in lua" and "does Steam treat it as borrowed":
         //
-        //   自购 + lua      : 走正版路线，报文原样透传（为了补 DLC 才写的 lua）
-        //   家庭共享 + lua  : 改成替代 AppId。服务器只要看到真实 appid 就会按
-        //                     共享许可记账、占用出借方名额；改写后它就认不出来。
-        //                     开了好友播报时这条走不到，前面广播段已经改成 480 了。
-        //   纯 lua 假入库   : 清空归属，服务器查不到这条 AppId 的许可记录，不占名额
-        //   纯家庭共享      : 还原成真实出借方，让客户端和服务器账本对得上，
-        //                     否则倒计时走完会断线；名额按 Steam 规则正常占用
+        //   self-owned + lua        : take the legitimate route, pass the message through unchanged (lua only adds DLC)
+        //   Family Sharing + lua    : rewrite to the substitute AppId. As soon as the server sees the real appid it
+        //                             books the shared license and consumes the lender's slot; after the rewrite it cannot tell.
+        //                             Unreachable with friend broadcast on, the broadcast block above already set 480.
+        //   lua only, fake license  : clear ownership, the server finds no license record for this AppId, no slot taken
+        //   Family Sharing only     : restore the real lender so client and server books match,
+        //                             otherwise the countdown ends in a disconnect; the slot is occupied per Steam rules
         for (int i = 0; i < msg.games_played_size(); ++i) {
             auto* game = msg.mutable_games_played(i);
             const AppId_t playedAppId = static_cast<AppId_t>(game->game_id() & UINT32_MAX);
             const AccountID_t reported = game->has_owner_id() ? game->owner_id() : 0;
             const AccountID_t lender = Hooks_Package::GetFamilySharedOwner(playedAppId);
-            // inLua 传 true 会把已标记为真拥有的 AppId 排除掉：自购游戏写进
-            // lua 只是为了补 DLC，主游戏本身走正版路线，上报不能动它的报文。
+            // Passing true to inLua excludes AppIds already marked as genuinely owned: a self-owned game is in
+            // lua only to add DLC, the main game takes the legitimate route and its report must not be touched.
             const bool inLua = LuaConfig::HasDepot(playedAppId, true);
 
             LOG_NETPACKET_DEBUG("FamilySharing: appid {} reported_owner={} lender_lookup={} inLua={}",
                                 playedAppId, reported, lender, inLua);
 
             if (lender > 1 && inLua) {
-                // 共享游戏又写了 lua：改成替代 AppId 上报。服务器只要看到真实
-                // appid 就会按共享许可记账、占用出借方名额；换成别的 id 就认不出来。
-                // 这个 AppId 在服务器上不存在，所以既不会播报也不会记录时长。
+                // Shared game that also has lua: report it as the substitute AppId. As soon as the server sees the
+                // real appid it books the shared license and consumes the lender's slot; with another id it cannot tell.
+                // This AppId does not exist on the server, so it is neither broadcast nor tracked for playtime.
                 game->set_game_id(kFamilySharedMaskAppId);
-                // 不填 game_extra_info：这个字段会被服务器拿去当播报的游戏名，
-                // 填上就等于告诉好友在玩什么，和「不播报」的目标相反。
+                // Leave game_extra_info empty: the server uses this field as the broadcast game name,
+                // filling it would tell friends what is being played, the opposite of "no broadcast".
                 game->clear_game_extra_info();
                 game->clear_owner_id();
                 patched = true;
@@ -1168,9 +1175,9 @@ namespace Hooks_NetPacket_OnlineFix {
             }
 
             if (inLua) {
-                // 纯 lua 假入库：清空归属，服务器查不到这条 AppId 的许可就
-                // 不按共享许可记账。自购场景在这之前已经被 owned 拦掉了，
-                // 走到这里的都是真正靠假许可跑起来的游戏。
+                // lua-only fake license: clear ownership, and with no license for this AppId the server
+                // does not book it against a shared license. Self-owned cases were already filtered out
+                // by the owned check above, so everything reaching here really runs on a fake license.
                 if (reported != 0) {
                     game->clear_owner_id();
                     patched = true;
@@ -1180,7 +1187,7 @@ namespace Hooks_NetPacket_OnlineFix {
 
             if (lender <= 1 || reported == lender) continue;
 
-            // 只有共享、没写 lua：还原真实出借方
+            // Shared only, no lua: restore the real lender
             game->set_owner_id(lender);
             patched = true;
             LOG_NETPACKET_INFO("FamilySharing: Restoring owner_id {} -> {} for game_id {}",
@@ -1581,7 +1588,7 @@ namespace {
 
         // ---- add new 147 service methods here ----
         default:
-            // job 名带版本号后缀时走子串兜底，保证观测点不漏
+            // Fall back to a substring match when the job name carries a version suffix, so no observation point is missed
             if (std::string_view(targetJobName).find("NotifyRunningApps") != std::string_view::npos) {
                 Hooks_NetPacket_FamilySharing::LogRunningApps(pBody, cbBody);
                 return;
@@ -1605,12 +1612,12 @@ namespace {
 
         switch (eMsg) {
 
-        // 掉线原因只在这条包里，协议是裸 varint：
-        // 字段 1 = eresult。不解出来只能看到"掉线了"，看不出为什么掉。
+        // The disconnect reason only lives in this packet, and the protocol is a bare varint:
+        // field 1 = eresult. Without decoding it you only see "disconnected", not why.
         case k_EMsgClientLoggedOff: {                  // 757
-            // 字段 1 是 eresult，varint 编码。这里按最保守的方式解：
-            // 最多读 10 字节、每步先判位移再移位，任何畸形输入都只是解码失败，
-            // 不能越界读也不能产生未定义行为。
+            // Field 1 is eresult, varint encoded. Decode it the most conservative way here:
+            // read at most 10 bytes, check the shift before shifting at each step, so any malformed input
+            // is merely a decode failure; no out-of-bounds read and no undefined behavior.
             uint64 eresult = 0;
             bool decoded = false;
             if (cbBody > 0 && pBody[0] == 0x08) {
@@ -1629,7 +1636,7 @@ namespace {
                 }
             }
             if (decoded) {
-                LOG_NETPACKET_INFO("ClientLoggedOff: eresult={} (0=无 1=OK 6=别处登录 34=会话被替换 38=远端断开)",
+                LOG_NETPACKET_INFO("ClientLoggedOff: eresult={} (0=none 1=OK 6=signed in elsewhere 34=session replaced 38=remote disconnect)",
                                    eresult);
             } else {
                 LOG_NETPACKET_INFO("ClientLoggedOff: eresult not decodable ({} bytes)", cbBody);
@@ -1657,7 +1664,7 @@ namespace {
             return;
 
         case k_EMsgClientSharedLibraryStopPlaying:     // 9406
-            // 停玩通知照常交给 Steam 处理，这里只记录内容。
+            // The stop-playing notification still goes to Steam as usual; here we only log its content.
             Hooks_NetPacket_FamilySharing::LogStopPlaying(pBody, cbBody);
             return;
 
@@ -1725,8 +1732,8 @@ namespace {
 
     HOOK_FUNC(RecvPkt, void*, void* pThis, CNetPacket* pPacket)
     {
-        // 布局没认出来之前整个收包路径都是盲的：Drain 们借 pCarrier 指针玩的
-        // 也是同一对字段。认不出就直接过原函数，一个字节都不碰。
+        // Until the layout is recognized the whole receive path is blind: the Drain helpers borrowing the pCarrier
+        // pointer rely on the same field pair. If it cannot be resolved, call the original and touch not a single byte.
         if (!EnsurePacketLayout(pPacket))
             return oRecvPkt(pThis, pPacket);
 

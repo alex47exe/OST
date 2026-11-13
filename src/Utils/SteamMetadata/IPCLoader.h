@@ -1,5 +1,6 @@
 #pragma once
 #include "IPCMessages.gen.h"
+#include "OSTPlatform/include/DynamicLibrary.h"
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -13,6 +14,8 @@ namespace IPCLoader {
         uint32_t      funcHash  = 0;
         uint32_t      fencepost = 0;
         uint32_t      argc      = 0;
+        uint32_t      wrapperRva  = 0;   // informational
+        uint32_t      methodIndex = 0;   // informational
     };
 
     struct Interface {
@@ -22,8 +25,10 @@ namespace IPCLoader {
         std::vector<Method> methods;
     };
 
-    // Fetch and parse metadata before installing IPC hooks.
-    bool Load(const std::string& steamclientPath);
+    // Fetch and parse metadata before installing IPC hooks. Values are checked
+    // against (and, if missing or stale, derived from) the loaded steamclient module.
+    bool Load(OSTPlatform::DynamicLibrary::ModuleHandle steamclient,
+              const std::string& steamclientPath);
 
     // Return nullptr when metadata is unavailable for a method.
     const Method* Find(EIPCInterface interfaceID, uint32_t funcHash);

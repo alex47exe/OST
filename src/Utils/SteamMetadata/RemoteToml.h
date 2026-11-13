@@ -1,5 +1,8 @@
 #pragma once
+#include <cstddef>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace RemoteToml {
 
@@ -14,16 +17,30 @@ namespace RemoteToml {
         bool        fromCache = false;
         std::string body;
         std::string sha256;
-        // 下载失败时才有意义：所有镜像都 404 = 上游真没发布（该弹窗）；
-        // false = 网络故障/超时（该静默，下次再试）。成功时恒 false。
+        // Only meaningful when the download fails: all mirrors 404 = upstream really has not published (show a popup);
+        // false = network failure/timeout (stay silent, retry next time). Always false on success.
         bool        allNotFound = false;
     };
 
-    // 优先复用以 SHA 命名的本地缓存，缺失时按序轮询全部远端镜像，全部失败才返回空
+    struct CachedBody {
+        std::string sha256;
+        std::string body;
+    };
+
+    // Prefer the local cache named by SHA; on a miss poll every remote mirror in order and return empty only if all fail
     Result Fetch(const Request& request);
 
-    // 删掉该请求对应的缓存文件（内容串台/过期时用），返回是否删掉过文件。
-    // 下一次 Fetch 会重新走远端下载。只删文件，不碰目录。
+    // Cached TOMLs for *other* builds of this channel/component, newest first
+    // (by file time). Used as baselines when deriving metadata locally.
+    std::vector<CachedBody> ReadOtherCached(const Request& request,
+                                            std::string_view excludeSha256,
+                                            size_t maxCount = 8);
+
+    // Write `body` as the cache entry for `sha256` (atomic replace).
+    bool WriteCache(const Request& request, std::string_view sha256, std::string_view body);
+
+    // Delete the cache file for this request (for cross-wired/stale content); returns whether a file was removed.
+    // The next Fetch goes to the remote again. Only deletes the file, never touches the directory.
     bool Invalidate(const Request& request);
 
 } // namespace RemoteToml

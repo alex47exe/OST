@@ -117,6 +117,7 @@ add_library(OpenSteamTool SHARED
     Utils/Logging/Log.cpp
     Utils/SteamMetadata/IPCLoader.cpp
     Utils/SteamMetadata/ManifestClient.cpp
+    Utils/SteamMetadata/MetadataDeriver.cpp
     Utils/SteamMetadata/PatternLoader.cpp
     Utils/SteamMetadata/RemoteToml.cpp
     Utils/SteamMetadata/StatsClient.cpp
@@ -169,18 +170,38 @@ target_link_libraries(OpenSteamTool PRIVATE
 )
 
 # Logging is compiled in only for Debug; Release reduces LOG_* to no-ops.
-# 版本号同时以宏的形式带进编译，诊断日志据此打印版本。
+# The version is also carried into the build as a macro, so diagnostic logs can print it.
 target_compile_definitions(OpenSteamTool PRIVATE
     $<$<CONFIG:Debug>:OPENSTEAMTOOL_LOGGING_ENABLED>
     OPENSTEAMTOOL_VERSION="${OPENSTEAMTOOL_VERSION}"
 )
 
 # ---------------------------------------------------------------------------
+# derive_check - developer tool: runs the local metadata deriver against a
+# Steam install offline (DLLs are mapped, never executed), validates existing
+# TOMLs and publishes derived ones. Used by the metadata workflow; not shipped.
+# Build with: cmake --build build --config Release --target derive_check
+# ---------------------------------------------------------------------------
+add_executable(derive_check EXCLUDE_FROM_ALL
+    "${OPENSTEAMTOOL_TOOLS_DIR}/derive_check/derive_check.cpp"
+    Utils/SteamMetadata/MetadataDeriver.cpp
+)
+target_include_directories(derive_check PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
+)
+target_link_libraries(derive_check PRIVATE
+    OSTPlatform
+    tomlplusplus::tomlplusplus
+)
+
+# ---------------------------------------------------------------------------
 # dwmapi.dll hijack — anti-cheat friendly loader DLL.
-# Steam 的 bin\vgui2_s.dll 静态导入 dwmapi，本代理被它连带加载进 steam.exe，
-# 于是反作弊不拦系统 DLL 名时也能把 OpenSteamTool 带进进程。这里不能用
-# linker forwarder（DWMAPI.* 会命中同名自环，vgui2_s 加载失败 VGUI_Setup failed），
-# 改为运行期 GetProcAddress 转发到系统 dwmapi——见 dwmapi/dwmapi.cpp。
+# Steam's bin\vgui2_s.dll statically imports dwmapi, so this proxy is pulled into steam.exe along with it,
+# which lets OpenSteamTool enter the process even when anti-cheat does not block system DLL names. A
+# linker forwarder cannot be used here (DWMAPI.* would hit a same-named self-loop and vgui2_s fails to load with VGUI_Setup failed),
+# so instead it forwards to the system dwmapi at runtime via GetProcAddress — see dwmapi/dwmapi.cpp.
 # ---------------------------------------------------------------------------
 add_library(dwmapi SHARED
     dwmapi/dwmapi.cpp
@@ -196,11 +217,11 @@ add_library(xinput1_4 SHARED
 )
 
 # ---------------------------------------------------------------------------
-# version.dll hijack — 早注隔离专用入口。steam.exe 静态导入 VERSION.dll，
-# 本代理随加载器最先进入进程，能抢在 steamclient64 首载之前架好重定向。
-# 但反作弊会拦 Steam 目录下这个未签名的 version.dll，所以默认禁用：产物直接
-# 带 .disabled 后缀，steam.exe 静态导入时找不到它、回退系统 version.dll，从而
-# 不触发反作弊；需要早注隔离时由工具侧去掉后缀再启用。
+# version.dll hijack — dedicated entry point for early-injection isolation. steam.exe statically imports VERSION.dll,
+# and this proxy enters the process first along with the loader, so it can set up the redirect before steamclient64's first load.
+# But anti-cheat blocks this unsigned version.dll in the Steam directory, so it is disabled by default: the artifact ships
+# with a .disabled suffix, so steam.exe cannot find it on static import and falls back to the system version.dll, thus
+# not triggering anti-cheat; when early-injection isolation is needed, the tool side drops the suffix to enable it.
 # ---------------------------------------------------------------------------
 add_library(version SHARED
     version/version.cpp

@@ -21,7 +21,9 @@ namespace {
         std::vector<std::string> luaPaths;
         std::string remoteUrlTemplate;
         std::string remoteOrder = "gh-proxy-first";
+        bool remoteAutoDerive = true;
         bool statsEnableApi = true;
+        std::string statsApiUrl = "https://stats.luastools.xyz/{appid}";
         std::string presenceDisplay = "spacewar";
         InjectionSettings injection;
         CloudSettings cloud;
@@ -30,7 +32,7 @@ namespace {
     std::mutex g_mutex;
     bool g_loadedOnce = false;
 
-    // order 归一化成小写再比对，避免大小写写错导致回退顺序不符合预期
+    // Normalize order to lowercase before comparing, so a case typo cannot silently change the failover order
     static std::string NormalizeRemoteOrder(std::string s) {
         for (auto& c : s)
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -66,7 +68,9 @@ namespace {
         luaPaths               = snapshot.luaPaths;
         remoteUrlTemplate      = snapshot.remoteUrlTemplate;
         remoteOrder            = snapshot.remoteOrder;
+        remoteAutoDerive       = snapshot.remoteAutoDerive;
         statsEnableApi         = snapshot.statsEnableApi;
+        statsApiUrl            = snapshot.statsApiUrl;
         presenceDisplay        = snapshot.presenceDisplay;
         injectEnabled          = snapshot.injection.enabled;
         injectLibraryX86       = snapshot.injection.libraryX86;
@@ -82,8 +86,9 @@ namespace {
         }
     }
 
-    // WinHTTP 把零超时读成无限等待，负数经转换会回绕成极大值；
-    // 两种取值都会让单次尝试跑穿取码预算，因此在入口处钳制并告警。
+    // WinHTTP reads a zero timeout as an infinite wait, and negative values wrap
+    // around to huge ones. Either value lets a single attempt blow through the fetch
+    // budget, so clamp at the entry point and warn.
     void ReadTimeoutMs(const toml::table& manifest, const char* key, uint32_t& out) {
         const auto val = manifest[key].value<int64_t>();
         if (!val) return;
@@ -170,9 +175,12 @@ namespace {
                 if (auto val = (*remote)["url_template"].value<std::string>()) {
                     snapshot.remoteUrlTemplate = *val;
                 }
+                if (auto val = (*remote)["auto_derive"].value<bool>()) {
+                    snapshot.remoteAutoDerive = *val;
+                }
                 if (auto val = (*remote)["order"].value<std::string>()) {
                     const std::string order = NormalizeRemoteOrder(*val);
-                    // "jsdelivr-first" 是旧名，继续认，语义等同 gh-proxy-first。
+                    // "jsdelivr-first" is the legacy name, still accepted and equivalent to gh-proxy-first.
                     if (order == "github-first" || order == "gh-proxy-first" ||
                         order == "jsdelivr-first") {
                         snapshot.remoteOrder = order;
@@ -186,6 +194,12 @@ namespace {
             if (auto stats = tbl["stats"].as_table()) {
                 if (auto val = (*stats)["enable_api"].value<bool>()) {
                     snapshot.statsEnableApi = *val;
+                }
+                if (auto val = (*stats)["api_url"].value<std::string>()) {
+                    if (val->find("{appid}") != std::string::npos)
+                        snapshot.statsApiUrl = *val;
+                    else
+                        LOG_WARN("Config: stats.api_url must contain {{appid}}; keeping default");
                 }
             }
 
@@ -279,6 +293,11 @@ namespace {
         return remoteUrlTemplate;
     }
 
+    bool GetRemoteAutoDerive() {
+        std::lock_guard lock(g_mutex);
+        return remoteAutoDerive;
+    }
+
     std::string GetRemoteOrder() {
         std::lock_guard lock(g_mutex);
         return remoteOrder;
@@ -296,6 +315,11 @@ namespace {
     bool GetStatsEnableApi() {
         std::lock_guard lock(g_mutex);
         return statsEnableApi;
+    }
+
+    std::string GetStatsApiUrl() {
+        std::lock_guard lock(g_mutex);
+        return statsApiUrl;
     }
 
     bool GetPresenceBroadcastEnabled() {

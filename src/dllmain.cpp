@@ -18,13 +18,14 @@
 
 namespace {
 
-// Diversion 影子模块的文件操作：全部跑在 InitThread worker 线程，绝不在 loader lock 下。
+// File operations for the Diversion shadow module: all run on the InitThread worker, never under the loader lock.
 constexpr int kDiversionCopyRetries = 3;
 constexpr std::chrono::milliseconds kDiversionCopyRetryDelay{50};
 
-// 我们进进程时 steamclient64 是否已在内存，决定首载抢劫有没有机会：
-// 在 = 来晚了，Steam 不会再 Load 第二次；不在 = 首载还没发生。
-// GetModuleHandle 只是读 PEB，loader lock 下调安全；建线程自带 happens-before，直接读就行。
+// Whether steamclient64 was already in memory when we entered the process decides whether the
+// first-load hijack has any chance: present = we arrived late, Steam won't Load it a second time;
+// absent = the first load hasn't happened yet. GetModuleHandle only reads the PEB, safe under the
+// loader lock; thread creation gives happens-before, so a plain read is fine.
 bool g_steamClientMappedAtAttach = false;
 
 bool IsDiversionUpToDate() {
@@ -48,11 +49,12 @@ bool CopySteamClientToDiversion() {
         LOG_WARN("Diversion: failed to create directory for {} ({})", DiversionPath, ec.message());
         return false;
     }
-    // 先拷到临时文件再原子替换：两个 Steam 进程同时启动时，直接写同一目标
-    // 会产生撕裂副本；MoveFileEx 替换是原子的，读到的要么是旧完整版要么是新完整版。
+    // Copy to a temp file first, then replace atomically: when two Steam processes start at once,
+    // writing the same target directly yields a torn copy; MoveFileEx replacement is atomic, so a
+    // reader sees either the old complete version or the new complete one.
     char tmpPath[kRuntimePathCapacity] = {};
     sprintf_s(tmpPath, "%s.tmp", DiversionPath);
-    // 旧 Steam 进程可能还占着句柄：只读属性先清掉，否则 CopyFile 必败。
+    // An old Steam process may still hold a handle: clear the read-only attribute first, otherwise CopyFile always fails.
     const DWORD attrs = GetFileAttributesA(tmpPath);
     if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) {
         SetFileAttributesA(tmpPath, FILE_ATTRIBUTE_NORMAL);
@@ -64,7 +66,7 @@ bool CopySteamClientToDiversion() {
             return true;
         }
         const DWORD gle = GetLastError();
-        // 只有共享冲突/拒绝访问值得重试；路径错误等直接放弃，不烧时间。
+        // Only sharing violations / access denied are worth retrying; path errors etc. are abandoned at once to save time.
         if (gle != ERROR_SHARING_VIOLATION && gle != ERROR_ACCESS_DENIED) {
             LOG_WARN("Diversion: CopyFile failed, not retryable (err={})", gle);
             break;
@@ -81,20 +83,22 @@ bool CopySteamClientToDiversion() {
 
 } // namespace
 
-// 回退到原版 steamclient：B2（劫持没装上）和超时看门狗（Steam 不来换）共用。
-// clientHooksArmed：client hook 是否已装在副本上（看门狗场景 true，需先卸再装；
-// B2 场景 false，hook 还没装，直接换模块即可）。
-// 成功返回 true；原版都加载失败返回 false（调用方按致命处理）。
+// Fall back to the original steamclient: shared by B2 (hijack not installed) and the timeout watchdog
+// (Steam never switches). clientHooksArmed: whether the client hooks are installed on the copy
+// (watchdog case true — unhook first, then rehook; B2 case false — hooks not installed yet, just swap
+// the module). Returns true on success; false if even the original fails to load (caller treats as fatal).
 static bool FallbackToOriginalSteamClient(bool clientHooksArmed) {
     if (clientHooksArmed) SteamClient::CoreUnhook();
-    // 注意：绝不 FreeLibrary diversion 副本！cloud_redirect 初始化时经
-    // GetModuleHandle 拿到副本句柄做地址解析 + vtable patch，存的全是绝对地址；
-    // 一旦卸载，下一次 stats/cloud RPC 就踩野指针崩溃，所以副本只废弃不卸载。
-    // 副本废弃但保持映射（多一个模块映射的代价），hook 已卸、谁也不会再用它，安全。
-    // client_hModule 直接指向原版，后续劫持分发与查询重定向全走原版，全程一致。
-    // 注意：回退后整个会话是原版世界，首载抢劫必须永久 bypass，不然之后再有人
-    // LoadLibrary(steamclient) 会拿到副本，两套 client 并存状态错乱。
-    // 这里只开不开：连 fallback 自己的这次 Load 也一并放行。
+    // Note: NEVER FreeLibrary the diversion copy! cloud_redirect initialization takes the copy's
+    // handle via GetModuleHandle for address resolution + vtable patching and stores absolute
+    // addresses; unloading it would make the next stats/cloud RPC crash on a dangling pointer, so the
+    // copy is abandoned but kept mapped (cost of one extra module mapping) — hooks already removed,
+    // nobody will use it again, safe. client_hModule points straight at the original, so later hijack
+    // dispatch and query redirection all go to the original, consistent throughout.
+    // Note: after the fallback the whole session is original-world, so the first-load hijack must be
+    // bypassed permanently, otherwise a later LoadLibrary(steamclient) picks up the copy and two
+    // client instances coexist in a corrupted state. This only ever enables it and never disables it:
+    // even the fallback's own Load below is let through.
     Hooks_SteamUI::SetFirstLoadRedirectBypass(true);
     client_hModule = OSTPlatform::DynamicLibrary::Load(SteamclientPath);
     g_IsDiversionActive.store(false);
@@ -103,25 +107,27 @@ static bool FallbackToOriginalSteamClient(bool clientHooksArmed) {
                   SteamclientPath, OSTPlatform::DynamicLibrary::GetLastErrorCode());
         return false;
     }
-    // PatternLoader 的 map 按模块句柄缓存，换模块后必须重 Load 一次。
+    // PatternLoader caches its map by module handle, so it must be re-Loaded after the module swap.
     PatternLoader::Load(client_hModule, SteamclientPath, "steamclient");
     if (clientHooksArmed) {
         SteamClient::CoreHook();
         PatternLoader::ReportMissingFunctions();
     }
-    // hook 晚装：Steam 在生效前已查完 ownership，之后不再主动重查。
-    // 置自举标志，下一次 CheckAppOwnership 用已就位的 CUser 强制刷一次，
-    // 第二波查询到来时注入完成。正常路径从不置位，零影响。
+    // Hooks installed late: Steam already finished its ownership queries before they took effect and
+    // won't re-query on its own. Set the bootstrap flag so the next CheckAppOwnership forces a single
+    // refresh with the now-ready CUser — injection is done by the time the second query wave arrives.
+    // The normal path never sets it: zero impact.
     Hooks_Package::RequestRequeryOnce();
     LOG_WARN("Diversion: fallback complete, hooks now on original steamclient64 — "
              "unlock keeps working, isolation disabled");
     return true;
 }
 
-// 超时回退看门狗：init 完成后 15s 内 Steam 还没换到副本上，基本可判定它在用
-// 启动时加载的原版（正常机器 1 秒内就换），副本上的 hook 全打空（解锁静默全灭）。
-// 此时搬回原版保解锁。误回退的代价只是丢隔离（= 1.5.2.1 行为，已验证可用）。
-// 睡眠分片：进程退出时最多 5s 内响应，不在已卸载的代码里醒来。
+// Timeout fallback watchdog: if Steam hasn't switched to the copy within 15s of init completing, it
+// is almost certainly using the original loaded at startup (a normal machine switches within a
+// second) and every hook on the copy misses (unlock: silent total failure). We then move back to the
+// original to keep unlock working; a wrong fallback only costs isolation (= 1.5.2.1 behavior, proven).
+// Sliced sleep: respond within 5s of process exit and never wake up in unloaded code.
 constexpr auto kDiversionAdoptTimeout = std::chrono::seconds{15};
 constexpr auto kWatchdogSlice = std::chrono::seconds{5};
 static_assert(kDiversionAdoptTimeout >= kWatchdogSlice,
@@ -131,7 +137,7 @@ static uint32_t DiversionWatchdog() {
     const int slices = static_cast<int>(kDiversionAdoptTimeout / kWatchdogSlice);
     for (int i = 0; i < slices; ++i) {
         std::this_thread::sleep_for(kWatchdogSlice);
-        // 进程正在退出/已卸载：直接结束，不碰任何东西。
+        // Process is exiting / already unloaded: bail out and touch nothing.
         if (!g_HooksInstalled.load()) return 0;
     }
     if (!g_IsDiversionActive.load() || g_DiversionAdopted.load()) return 0;
@@ -145,10 +151,10 @@ static uint32_t DiversionWatchdog() {
 // prepare key runtime paths.
 bool InitializeSteamComponents()
 {
-    // Steam 根目录以宿主 exe 为准，不用 CWD：经外部工具拉起 steam.exe 时 CWD
-    // 是继承来的工具目录，用 CWD 会导致 steamclient64.dll 定位失败、整个 init
-    // 静默全灭（零 hook、解锁全灭）。steamclient64.dll 必定与 steam.exe 同目录，
-    // exe 路径才是唯一可信的锚点。
+    // The Steam root comes from the host exe, not CWD: when steam.exe is launched by an external
+    // tool, CWD is the inherited tool directory, and using it makes steamclient64.dll resolution fail
+    // and the whole init fail silently and totally (zero hooks, unlock dead). steamclient64.dll is
+    // always in the same directory as steam.exe, so the exe path is the only trustworthy anchor.
     const std::filesystem::path exePath = OSTPlatform::DynamicLibrary::GetMainExecutablePath();
     const std::string exeName = exePath.filename().string();
     if (exeName.empty() || _stricmp(exeName.c_str(), "steam.exe") != 0) {
@@ -168,18 +174,20 @@ bool InitializeSteamComponents()
     sprintf_s(LuaDir,          kRuntimePathCapacity, "%s\\config\\lua",        SteamInstallPath);
     sprintf_s(ConfigPath,      kRuntimePathCapacity, "%s\\opensteamtool.toml", SteamInstallPath);
     
-    // Diversion 影子模块：所有 hook 只打在 steamclient64.dll 的完整副本上，
-    // 原版模块保持 100% 干净，Denuvo/RE 引擎的完整性检查才能通过。
-    // 副本加载失败很可能是 Steam 自更新中途拷出的撕裂文件，删掉重拷一次再试；
-    // 还不行才回退原版并大声告警——静默回退等于安静裸奔。
+    // Diversion shadow module: every hook is applied only to a full copy of steamclient64.dll, and
+    // the original module stays 100% clean so Denuvo/RE engine integrity checks pass.
+    // A failed copy load is most likely a torn file from a Steam self-update in progress; delete it
+    // and copy once more. Only then fall back to the original with a loud warning — silently
+    // falling back means running naked without telling anyone.
     client_hModule = nullptr;
-    // 隔离总开关：只有抢在 steamclient 首载之前进入进程，首载抢劫才有窗口可抢。
-    // 到达时若 steamclient64 已在内存（dwmapi 经 vgui2_s 晚注），继续造副本也换不上，
-    // 看门狗只会空等超时再回退，白拷一份几十 MB 的副本。这种晚注场景直接不造副本、
-    // 不装首载重定向、不起看门狗，全程用原版。
+    // Isolation master switch: the first-load hijack only has a window if we enter the process
+    // before steamclient's first load. If steamclient64 is already in memory on arrival (dwmapi
+    // injected late via vgui2_s), a fresh copy can never be adopted and the watchdog would only wait
+    // out the timeout before falling back, wasting a tens-of-MB copy — so skip copy, first-load
+    // redirect and watchdog entirely and use the original throughout.
     const bool diversionEnabled = !g_steamClientMappedAtAttach;
-    // 只有"确认最新"或"刚拷成功"的副本才值得信任；拷都拷不出来就别碰旧文件，
-    // 直接回退原版（陈旧副本不可信）。
+    // Only a copy that is "confirmed up to date" or "just copied successfully" is trustworthy; if the
+    // copy itself fails, don't touch the old file — fall back to the original (a stale copy is untrusted).
     bool diversionFileUsable = false;
     if (diversionEnabled) {
         diversionFileUsable = IsDiversionUpToDate();
@@ -245,8 +253,9 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
         return 1;
     }
 
-    // 首载抢劫即刻武装：只依赖 kernel32，与 pattern/SteamUI hook 无依赖，
-    // 越早装上抢到 Steam 主线程首次 LoadLibrary(steamclient) 的窗口越大。
+    // Arm the first-load hijack immediately: it only depends on kernel32, nothing from the pattern or
+    // SteamUI hooks, and the earlier it is installed the bigger the window to catch Steam's main
+    // thread's first LoadLibrary(steamclient).
     if (g_IsDiversionActive.load())
         Hooks_SteamUI::InstallFirstLoadRedirect();
 
@@ -262,14 +271,14 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     PatternLoader::Load(ui_hModule, SteamUIPath, "steamui");
     PatternLoader::Load(client_hModule, SteamclientPath, "steamclient");
 
-    // SteamUI hook 先装：LoadModuleWithPath 劫持必须在 Steam 自己加载
-    // steamclient 之前就位，它内部会等 g_HooksInstalled 屏障再放行。
-    // （首载抢劫已在 InitializeSteamComponents 后就位，见上。）
+    // Install the SteamUI hooks first: the LoadModuleWithPath hijack must be in place before Steam
+    // loads steamclient itself; internally it waits on the g_HooksInstalled barrier before letting
+    // Steam through. (The first-load hijack is already in place right after InitializeSteamComponents, see above.)
     SteamUI::CoreHook();
 
-    // 两条换机路径任一可用就不回退：LoadModuleWithPath 劫持（老路径）或
-    // 首载抢劫（1791 路径）；两条都没了影子模块才是没人用的摆设，必须
-    // 换回原版再装 client hook，否则解锁静默全灭。
+    // No fallback while either swap path is usable: the LoadModuleWithPath hijack (legacy path) or the
+    // first-load hijack (1791 path). Only when both are gone is the shadow module a useless ornament,
+    // and we must switch back to the original and reinstall the client hooks, or unlock fails silently.
     if (g_IsDiversionActive.load() && !Hooks_SteamUI::IsDiversionRedirectArmed() &&
         !Hooks_SteamUI::IsFirstLoadRedirectArmed()) {
         LOG_WARN("Diversion redirect unavailable (LoadModuleWithPath pattern missing), "
@@ -281,7 +290,10 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     }
 
     // IPC method metadata (funcHash, fencepost, argc, ...)
-    IPCLoader::Load(SteamclientPath);
+    IPCLoader::Load(client_hModule, SteamclientPath);
+
+    // One popup for every metadata file that was missing, instead of one each.
+    SteamDiagnostics::ShowMissingMetadataSummary();
 
     std::vector<std::string> watchDirs = Config::GetLuaPaths();
     watchDirs.push_back(std::string(LuaDir));
@@ -303,7 +315,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
     g_HooksInstalled.store(true);
     LOG_INFO("OpenSteamTool init complete ({})",
              g_IsDiversionActive.load() ? "Diversion active" : "Diversion bypassed, using original steamclient64");
-    // 超时回退看门狗：只在隔离启用时才有事可做，直连原版时不启线程。
+    // Timeout fallback watchdog: it only has work to do when isolation is enabled; no thread when running on the original.
     if (g_IsDiversionActive.load())
         OSTPlatform::Thread::StartDetached([] { return DiversionWatchdog(); });
     return 0;

@@ -38,10 +38,12 @@ namespace Config {
     std::string GetLogDir();
     std::vector<std::string> GetLuaPaths();
     std::string GetRemoteUrlTemplate();
+    bool GetRemoteAutoDerive();
     std::string GetRemoteOrder();
     InjectionSettings GetInjectionSettings();
     CloudSettings GetCloudSettings();
     bool GetStatsEnableApi();
+    std::string GetStatsApiUrl();
 
     // [presence] — friend broadcast mode: "spacewar" (default) or "none".
     // Anything other than "none" keeps the current broadcast behavior.
@@ -52,7 +54,7 @@ namespace Config {
     inline uint32_t manifestTimeoutConnect = 5000;
     inline uint32_t manifestTimeoutSend    = 10000;
     inline uint32_t manifestTimeoutRecv    = 10000;
-    // 顺位回退开关：关闭时仅请求首选源。
+    // Ordered-failover switch: when off, only the preferred source is queried.
     inline bool manifestFailover = true;
 
     // [log]
@@ -66,12 +68,16 @@ namespace Config {
 
     // [remote]
     inline std::string remoteUrlTemplate;
-    // 默认 gh-proxy 镜像优先、GitHub 直连兜底；配成 "github-first" 切顺序；
-    // 旧值 "jsdelivr-first" 继续认，等同 gh-proxy-first
+    // Default: gh-proxy mirror first, GitHub direct connection as fallback; set "github-first" to swap the order;
+    // the legacy value "jsdelivr-first" is still accepted and means gh-proxy-first
     inline std::string remoteOrder = "gh-proxy-first";
+    // Derive patterns/IPC metadata locally when nothing is published for the installed build.
+    inline bool remoteAutoDerive = true;
 
     // [stats]
     inline bool statsEnableApi = true;
+    // Endpoint used for the stats SteamID lookup; must contain {appid}.
+    inline std::string statsApiUrl = "https://stats.luastools.xyz/{appid}";
 
     // [presence] — "spacewar" shows the real game name to friends (default),
     // "none" skips the name broadcast patches.

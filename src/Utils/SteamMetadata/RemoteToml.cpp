@@ -3,27 +3,22 @@
 #include "Utils/Config/Config.h"
 #include "Utils/Logging/Log.h"
 #include "Utils/SteamMetadata/SteamDiagnostics.h"
+#include "Utils/ProjectInfo.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace RemoteToml {
 
 namespace {
-    // 签名源：huanyuejue/steam-monitor（定时采集 stable+beta，文件更全）。
-    // 与 OpenSteam001 版布局差异：channel 不是分支而是 main 下的目录，
-    // 因此分支固定 main，{channel} 走路径段——占位符集合不变，模板机制兼容。
-    constexpr const char* kGithubTemplate =
-        "https://raw.githubusercontent.com/huanyuejue/steam-monitor/"
-        "main/{channel}/{component}/{sha256}.toml";
-    // gh-proxy 套在 raw 直连外面：对大仓库的 raw 文件比 jsDelivr 稳定，
-    // 失败才回退 GitHub 直连保底。
-    constexpr const char* kGhProxyTemplate =
-        "https://gh-proxy.com/https://raw.githubusercontent.com/huanyuejue/steam-monitor/"
-        "main/{channel}/{component}/{sha256}.toml";
+    // Metadata source layout: the `pattern` and `ipc` branches of ProjectInfo::kRepoUrl,
+    // laid out as {component}/{sha256}.toml, with a maintained fork and the original
+    // tracker as fallbacks. See ProjectInfo.h.
 
     static bool HasPlaceholder(std::string_view text, std::string_view placeholder)
     {
@@ -71,10 +66,27 @@ namespace {
             return { remoteUrlTemplate };
         }
 
-        // 默认优先请求 gh-proxy 镜像，失败再回退 GitHub 直连
-        if (Config::GetRemoteOrder() == "github-first")
-            return { kGithubTemplate, kGhProxyTemplate };
-        return { kGhProxyTemplate, kGithubTemplate };
+        // Built-in order: this repository's metadata branches first (gh-proxy or raw
+        // depending on [remote] order), then the jsDelivr mirror, the maintained fork,
+        // and the original tracker as the last resort.
+        std::vector<std::string> urls;
+        if (Config::GetRemoteOrder() == "github-first") {
+            urls.push_back(ProjectInfo::kLocalRawTemplate);
+            urls.push_back(ProjectInfo::kLocalGhProxyTemplate);
+        } else {
+            urls.push_back(ProjectInfo::kLocalGhProxyTemplate);
+            urls.push_back(ProjectInfo::kLocalRawTemplate);
+        }
+        urls.push_back(ProjectInfo::kLocalJsdelivrTemplate);
+        urls.push_back(ProjectInfo::kForkRawTemplate);
+        urls.push_back(ProjectInfo::kUpstreamRawTemplate);
+        return urls;
+    }
+
+    static std::filesystem::path CacheDirFor(const Request& request)
+    {
+        const std::filesystem::path steamRoot = std::filesystem::path(request.dllPath).parent_path();
+        return steamRoot / "opensteamtool" / request.channel / request.component;
     }
 } // namespace
 
@@ -98,8 +110,7 @@ Result Fetch(const Request& request)
              request.channel, request.component, out.sha256, hashMs);
 
     // 2. Cache path & dir.
-    fs::path steamRoot = fs::path(request.dllPath).parent_path();
-    fs::path cacheDir  = steamRoot / "opensteamtool" / request.channel / request.component;
+    fs::path cacheDir  = CacheDirFor(request);
     fs::path cachePath = cacheDir / (out.sha256 + ".toml");
     const std::string cachePathText = cachePath.string();
 
@@ -110,7 +121,11 @@ Result Fetch(const Request& request)
                  request.channel, request.component, cacheDir.string(), mkdirEc.message());
     }
 
-    // 缓存优先：pattern/IPC 文件以 DLL SHA-256 命名，内容不可变，命中直接返回，避免远端超时阻塞 Hook 安装
+    // Cache first: pattern/IPC files are named by DLL SHA-256 and their content is immutable; a hit returns immediately,
+    // so remote timeouts cannot block hook installation.
+    // Exception: locally derived entries ("# Auto-derived ...") are re-checked against the mirrors so an upstream
+    // publication replaces them; they still serve as the fallback when every mirror is unavailable.
+    std::string derivedCacheBody;
     {
         std::error_code ec;
         if (fs::exists(cachePath, ec) && !ec) {
@@ -121,24 +136,32 @@ Result Fetch(const Request& request)
                     std::string buf((std::istreambuf_iterator<char>(ifs)),
                                      std::istreambuf_iterator<char>());
                     if (!buf.empty()) {
-                        LOG_INFO("RemoteToml({}/{}): loaded from cache {}",
-                                 request.channel, request.component, cachePathText);
-                        out.body = std::move(buf);
-                        out.ok = true;
-                        out.fromCache = true;
-                        return out;
+                        if (buf.rfind("# Auto-derived", 0) == 0) {
+                            LOG_INFO("RemoteToml({}/{}): found locally derived cache {}; checking mirrors for a published copy",
+                                     request.channel, request.component, cachePathText);
+                            derivedCacheBody = std::move(buf);
+                        } else {
+                            LOG_INFO("RemoteToml({}/{}): loaded from cache {}",
+                                     request.channel, request.component, cachePathText);
+                            out.body = std::move(buf);
+                            out.ok = true;
+                            out.fromCache = true;
+                            return out;
+                        }
                     }
                 }
-                LOG_WARN("RemoteToml({}/{}): cache file exists but failed to read or empty: {}",
-                         request.channel, request.component, cachePathText);
+                if (derivedCacheBody.empty()) {
+                    LOG_WARN("RemoteToml({}/{}): cache file exists but failed to read or empty: {}",
+                             request.channel, request.component, cachePathText);
+                }
             }
         }
     }
 
     // 3. Cache miss -> try remote (poll all mirrors in order).
-    // 逐个尝试全部镜像才判定失败：CDN 同步存在延迟，首个镜像 404 时后一个镜像可能已有文件。
-    // transport 失败（非 404）每个镜像多打一次：跨国链路抖一下很常见，一次重试专治抖动；
-    // 404 不重试（重下也是没有）。单次重试封顶，不在启动路径上烧时间。
+    // Try every mirror before declaring failure: CDN sync is delayed, so when the first mirror 404s the next may already have the file.
+    // On a transport failure (non-404) each mirror is hit once more: cross-border links jitter often, and one retry absorbs the jitter;
+    // 404 is not retried (refetching finds nothing either). Capped at one retry, so we do not burn time on the startup path.
     const std::vector<std::string> urlTemplates = BuildUrlTemplates();
     OSTPlatform::Http::Result http;
     std::string lastUrl;
@@ -181,7 +204,7 @@ Result Fetch(const Request& request)
 
     // 4. Remote OK → write cache, return body.
     if (http.ok && http.status == 200 && !http.body.empty()) {
-        // 先落临时文件再替换，保证缓存文件不会因崩溃停留在截断状态
+        // Write a temporary file first, then replace, so a crash cannot leave the cache file truncated
         fs::path tmpPath = cachePath;
         tmpPath += ".tmp";
         std::error_code writeEc;
@@ -215,9 +238,19 @@ Result Fetch(const Request& request)
     }
 
     // 5. Total failure — caller handles popup / degraded mode.
-    // 区分全部 404 与网络故障：前者表示上游未发布，后者表示本机网络问题。
-    // allNotFound 语义收紧：必须至少尝试过一个镜像且全 404 才算（模板配错导致
-    // 零尝试不算"未发布"，算配置错，同样不弹窗）。
+    // A derived cache still serves this launch; it is retried against the mirrors next time.
+    if (!derivedCacheBody.empty()) {
+        LOG_INFO("RemoteToml({}/{}): no mirror has a published copy, using the locally derived cache {}",
+                 request.channel, request.component, cachePathText);
+        out.body = std::move(derivedCacheBody);
+        out.ok = true;
+        out.fromCache = true;
+        return out;
+    }
+
+    // Distinguish all-404 from network failure: the former means upstream has not published, the latter is a local network problem.
+    // allNotFound is tightened: at least one mirror must have been tried and all must be 404 (zero attempts
+    // from a misconfigured template do not count as "unpublished" but as misconfiguration, which also skips the popup).
     out.allNotFound = !urlTemplates.empty() && notFoundCount == urlTemplates.size();
     if (out.allNotFound) {
         LOG_WARN("RemoteToml({}/{}): upstream has not published (all {} mirrors 404, last URL: {})",
@@ -236,9 +269,7 @@ bool Invalidate(const Request& request)
     namespace fs = std::filesystem;
     const std::string sha256 = SteamDiagnostics::Sha256Of(request.dllPath);
     if (sha256.empty()) return false;
-    fs::path cachePath = fs::path(request.dllPath).parent_path() /
-                         "opensteamtool" / request.channel / request.component /
-                         (sha256 + ".toml");
+    fs::path cachePath = CacheDirFor(request) / (sha256 + ".toml");
     std::error_code ec;
     const bool removed = fs::remove(cachePath, ec);
     if (ec) {
@@ -251,6 +282,79 @@ bool Invalidate(const Request& request)
                  request.channel, request.component, cachePath.string());
     }
     return removed;
+}
+
+std::vector<CachedBody> ReadOtherCached(const Request& request,
+                                        std::string_view excludeSha256,
+                                        size_t maxCount)
+{
+    namespace fs = std::filesystem;
+    std::vector<std::pair<fs::file_time_type, fs::path>> files;
+
+    std::error_code ec;
+    for (fs::directory_iterator it(CacheDirFor(request), ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path& p = it->path();
+        if (p.extension() != ".toml") continue;
+        const std::string stem = p.stem().string();
+        if (stem.size() != 64 || stem == excludeSha256) continue;
+        std::error_code tec;
+        const auto t = fs::last_write_time(p, tec);
+        if (tec) continue;
+        files.emplace_back(t, p);
+    }
+    std::sort(files.begin(), files.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    std::vector<CachedBody> out;
+    for (const auto& [t, p] : files) {
+        if (out.size() >= maxCount) break;
+        std::ifstream ifs(p, std::ios::binary);
+        if (!ifs) continue;
+        std::string buf((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        if (buf.empty()) continue;
+        out.push_back({p.stem().string(), std::move(buf)});
+    }
+    return out;
+}
+
+bool WriteCache(const Request& request, std::string_view sha256, std::string_view body)
+{
+    namespace fs = std::filesystem;
+    if (sha256.empty() || body.empty()) return false;
+
+    const fs::path dir = CacheDirFor(request);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+
+    const fs::path finalPath = dir / (std::string(sha256) + ".toml");
+    const fs::path tmpPath   = dir / (std::string(sha256) + ".toml.tmp");
+    {
+        std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!ofs) {
+            LOG_WARN("RemoteToml({}/{}): could not open {} for writing",
+                     request.channel, request.component, tmpPath.string());
+            return false;
+        }
+        ofs.write(body.data(), static_cast<std::streamsize>(body.size()));
+        if (!ofs) {
+            std::error_code cleanupEc;
+            fs::remove(tmpPath, cleanupEc);
+            return false;
+        }
+    }
+
+    fs::remove(finalPath, ec);
+    ec.clear();
+    fs::rename(tmpPath, finalPath, ec);
+    if (ec) {
+        LOG_WARN("RemoteToml({}/{}): could not replace {} ({})",
+                 request.channel, request.component, finalPath.string(), ec.message());
+        std::error_code cleanupEc;
+        fs::remove(tmpPath, cleanupEc);
+        return false;
+    }
+    LOG_INFO("RemoteToml({}/{}): wrote {}", request.channel, request.component, finalPath.string());
+    return true;
 }
 
 } // namespace RemoteToml
