@@ -37,6 +37,8 @@ if(NOT OST_VERSION_STRING MATCHES "^[0-9]")
     set(OST_VERSION_STRING "dev")
 endif()
 set(OST_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/ost-manager/ost.manifest")
+# Forward slashes: the resource compiler accepts them and the path needs no escaping.
+set(OST_ICON "${CMAKE_CURRENT_SOURCE_DIR}/ost-manager/ost.ico")
 set(OST_RC_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/ost-manager/ost.rc.in")
 set(OST_STAGE_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/ost-manager/stage_file.cmake")
 set(OST_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -95,6 +97,7 @@ foreach(tool ost-loader ost-manager)
         gdi32
         shell32
         user32
+        uxtheme
     )
     if(MSVC)
         # /utf-8 keeps the wide literals intact; both tools are warning-clean at /W4.
