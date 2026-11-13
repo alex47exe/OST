@@ -1,0 +1,142 @@
+# opensteamtool.toml — OpenSteamTool 配置文件
+# 放置位置：<Steam>/opensteamtool.toml（与 steam.exe 同级）。
+# 启动时加载，文件变更后自动热重载，无需重启 Steam。
+# 节名与键名始终为英文，各语言版本仅注释不同。
+# 其他语言版本：opensteamtool.example.toml（English）、opensteamtool.example.es.toml（Español）。
+# 未知键会被忽略；文件格式有误时整份配置会被拒绝并回退到内置默认值，修改后请检查日志。
+
+[log]
+# 所有模块日志的详细程度（仅 Debug 构建生效；Release 构建中日志会被编译为空操作）。
+# 可选值：trace、debug、info、warn、error
+# 日志写入 <Steam>/opensteamtool/*.log。
+level = "debug"
+
+[manifest]
+# 仓库 manifest 请求码的上游 API。
+# 必须是下列名称之一；无法识别的名称会记录警告并回退到 "20770407"。
+#   "20770407"      → https://20770407.xyz/manifest/{depotId}/{gid}（默认）
+#   "SDM"           → https://steamapi.993499094.xyz/manifest/{depotId}/{gid}
+#   "manifestdex"   → https://manifest.manifestdex.com/{gid}（需要 User-Agent: ManifestDeX/1.0，已自动发送）
+#   "wudrm"         → http://gmrc.wudrm.com/manifest/{gid}（推荐中国用户使用）
+#   "steamrun"      → https://manifest.steam.run/api/manifest/{gid}
+#   "opensteamtool" → https://manifest.opensteamtool.com/{gid}
+# 若 <Steam>/config/lua/manifest.lua 定义了 fetch_manifest_code(gid) 或
+# fetch_manifest_code_ex(app_id, depot_id, gid)，这些 Lua 函数会先于下方的
+# url 设置被尝试。
+#
+# url 只决定优先尝试的上游。开启 failover 后，首选失败时会按表顺序尝试其余上游；
+# 配置的 url 始终是下次取码的首选。刚失败的上游在 60 秒内会被跳过。
+# 首选上游的位置不因回退结果而改变。
+url = "20770407"
+
+# 上游顺位回退开关。true（默认）表示首选失败时尝试下一个；false 表示只请求上面的 url。
+# 热加载生效，无需重启。
+failover = true
+#
+# --- manifest.lua 参考 ---
+# C++ 侧向 Lua 提供 http_get(url [, headers]) 与
+# http_post(url, body [, headers])。成功返回 (body_string, status_code)，
+# 失败返回 (nil, error_msg)。
+#
+# -- 示例：先试 wudrm（纯文本 uint64），失败再回退 steamrun（JSON）。
+# -- 返回数字 *字符串*，避免超过 2^53 时的双精度精度损失。
+# function fetch_manifest_code(gid)
+#     -- wudrm 返回形如 "10570517747114638659"
+#     local body, st = http_get("http://gmrc.wudrm.com/manifest/" .. gid)
+#     if st == 200 and body then return body end
+#     -- steamrun 返回 {"content":"1666836470726104466"}
+#     body, st = http_get("https://manifest.steam.run/api/manifest/" .. gid)
+#     if st == 200 and body then
+#         local code = body:match('"content":"(%d+)"')
+#         if code then return code end
+#     end
+#     return nil
+# end
+#
+# -- 带 app_id 与 depot_id 的扩展变体：
+# function fetch_manifest_code_ex(app_id, depot_id, gid)
+#     local body, st = http_get("https://your-api.com/manifest-code/" .. app_id .. "/" .. gid)
+#     if st == 200 and body and body:match("^%d+$") then
+#         return body
+#     end
+#     return nil
+# end
+
+# manifest 请求的 HTTP 超时（毫秒）。
+# 每项取值范围为 [1, 15000]（整次取码的总预算）；
+# 超出范围会被钳制，并在日志中记录警告。
+# 一次取码会依次尝试多个上游，所有尝试共享这 15000 毫秒预算。
+# timeout_resolve_ms  — DNS 解析        （默认：5000）
+# timeout_connect_ms  — TCP 握手        （默认：5000）
+# timeout_send_ms     — 请求发送        （默认：10000）
+# timeout_recv_ms     — 响应体下载      （默认：10000）
+timeout_resolve_ms = 5000
+timeout_connect_ms = 5000
+timeout_send_ms    = 10000
+timeout_recv_ms    = 10000
+
+[stats]
+# 当不存在 Lua setStat(appid, "steamid") 覆盖时，自动查询 stats API
+# 获取推荐的 SteamID。
+# 优先级：setStat > stats API（启用且返回有效值时）> 硬编码预设 SteamID。
+enable_api = true
+# Stats API 端点，必须包含 {appid}。响应体为 SteamID64。
+# api_url = "https://stats.luastools.xyz/{appid}"
+
+[presence]
+# 已解锁游戏对好友的显示方式。
+#   "spacewar" → 广播真实游戏名（默认）
+#   "none"     → 跳过名称广播补丁。未拥有的游戏对好友不可见；
+#                -onlinefix 游戏回退为 Spacewar。
+display = "spacewar"
+
+# 额外的 Lua 配置目录（可选）。
+# 文件在默认的 <Steam>/config/lua 目录之后加载。
+# 默认目录始终最后加载，因此用户文件优先级更高。
+# 示例 —— 加载另一个磁盘上的自定义目录：
+#   [lua]
+#   paths = ["D:/my-steam-config/lua"]
+[lua]
+# paths = []
+
+[inject]
+# 可选的游戏进程库注入。
+# 注入的库必须与目标进程架构匹配。
+# 相对路径以 Steam 根目录为基准解析。
+enabled = false
+# library_x64 = "OpenSteamTool.GameHook.x64.dll"
+# library_x86 = "OpenSteamTool.GameHook.x86.dll"
+
+[cloud]
+# 可选的 Steam 云存档重定向（针对解锁的 "lua" 游戏），基于
+# CloudRedirect（https://github.com/Selectively11/CloudRedirect）。
+# 启用后，OpenSteamTool 会在 Steam 进程内加载 cloud_redirect.dll，
+# 把每个 addappid() 游戏注册为可重定向应用，并通过 CloudRedirect 的
+# 云存档引擎转发它们的 Steam Cloud RPC。
+#
+# 提供方登录（Google Drive / OneDrive / 本地文件夹）仍由 CloudRedirect
+# 自带的配套程序完成 —— OpenSteamTool 只负责宿主 DLL。
+enabled = false
+# cloud_redirect.dll 的路径。可为绝对路径，或相对于 Steam 根目录的路径。
+# 未设置时默认为 "<Steam>/cloud_redirect.dll"。
+# library = "cloud_redirect.dll"
+
+[remote]
+# 可选的元数据镜像。留空时使用内置链：本仓库的 `pattern` 与 `ipc` 分支
+# （gh-proxy / GitHub raw）、jsDelivr 镜像、维护中的 fork、最后是原始
+# steam-monitor 跟踪器。
+# 自定义镜像会替换内置远程源，且必须包含全部三个占位符：
+# {channel}、{component}、{sha256}。
+#
+# 内置镜像顺序（默认：gh-proxy-first）。
+#   "gh-proxy-first" → 先试 gh-proxy，再回退 GitHub raw
+#   "github-first"   → 先试 GitHub raw，再回退 gh-proxy
+#   "jsdelivr-first" → 旧名，等同 gh-proxy-first
+# 文件缓存在 <Steam>/opensteamtool/<channel>/<component>/<sha256>.toml。
+# order = "gh-proxy-first"
+# 当没有任何已发布元数据匹配当前构建时，在本地推导 pattern/IPC 元数据
+# （基于缓存的旧版本 + 内置基线，并针对 DLL 校验结果）。
+# auto_derive = true
+#
+# url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/huanyuejue/steam-monitor@main/{channel}/{component}/{sha256}.toml"

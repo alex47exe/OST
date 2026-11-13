@@ -1,14 +1,20 @@
 # opensteamtool.toml — OpenSteamTool configuration
-# Place at: <Steam>/opensteamtool.toml
-# This file is loaded at startup and hot-reloaded after changes.
+# Place at: <Steam>/opensteamtool.toml (next to steam.exe).
+# Loaded at startup and hot-reloaded on change; no restart required.
+# Section and key names are always English; only the comments are localized.
+# Localized copies: opensteamtool.example.zh.toml (Chinese), opensteamtool.example.es.toml (Spanish).
+# Unknown keys are ignored. A malformed file is rejected as a whole and the built-in
+# defaults are used instead, so check the log after editing.
 
 [log]
-# Log verbosity for all log files (Debug build only).
+# Log verbosity for all module logs (Debug build only; Release builds compile logging out).
 # Valid: trace, debug, info, warn, error
+# Files are written to <Steam>/opensteamtool/*.log.
 level = "debug"
 
 [manifest]
 # Which upstream API to query for depot manifest request codes.
+# Must be one of the names below; an unknown name logs a warning and falls back to "20770407".
 #   "20770407"      → https://20770407.xyz/manifest/{depotId}/{gid} (default)
 #   "SDM"           → https://steamapi.993499094.xyz/manifest/{depotId}/{gid}
 #   "manifestdex"   → https://manifest.manifestdex.com/{gid} (requires User-Agent: ManifestDeX/1.0, sent automatically)
@@ -59,7 +65,6 @@ failover = true
 #     end
 #     return nil
 # end
-url = "20770407"
 
 # HTTP timeouts for manifest requests (milliseconds).
 # Each value must be within [1, 15000] (the whole-fetch budget);
@@ -76,10 +81,12 @@ timeout_send_ms    = 10000
 timeout_recv_ms    = 10000
 
 [stats]
-# Automatically query https://stats.opensteamtool.com/{appid} for a recommended
-# SteamID when no Lua setStat(appid, "steamid") override exists.
+# Automatically query the stats API for a recommended SteamID when no Lua
+# setStat(appid, "steamid") override exists.
 # Priority: setStat > stats API when enabled and valid > hardcoded preset SteamID.
 enable_api = true
+# Stats API endpoint; must contain {appid}. The response body is a SteamID64.
+# api_url = "https://stats.luastools.xyz/{appid}"
 
 [presence]
 # How unlocked games are shown to friends.
@@ -100,6 +107,7 @@ display = "spacewar"
 [inject]
 # Optional library injection into game processes.
 # The injected library must match the target process architecture.
+# Relative paths are resolved from the Steam root directory.
 enabled = false
 # library_x64 = "OpenSteamTool.GameHook.x64.dll"
 # library_x86 = "OpenSteamTool.GameHook.x86.dll"
@@ -119,14 +127,21 @@ enabled = false
 # library = "cloud_redirect.dll"
 
 [remote]
-# Optional metadata mirror. Leave unset to use gh-proxy with GitHub fallback.
+# Optional metadata mirror. Leave unset to use the built-in chain: the `pattern`
+# and `ipc` branches of this repository (gh-proxy / GitHub raw), the jsDelivr
+# mirror, the maintained fork, then the original steam-monitor tracker.
 # A custom mirror replaces the built-in remote sources and must include all
 # three placeholders: {channel}, {component}, and {sha256}.
 #
 # Built-in mirror order (default: gh-proxy-first).
 #   "gh-proxy-first" → try gh-proxy first, fall back to GitHub raw
 #   "github-first"   → try GitHub raw first, fall back to gh-proxy
+#   "jsdelivr-first" → legacy alias, same as gh-proxy-first
+# Files are cached under <Steam>/opensteamtool/<channel>/<component>/<sha256>.toml.
 # order = "gh-proxy-first"
+# Derive pattern/IPC metadata locally when nothing is published for the installed
+# build (cached earlier builds + a built-in baseline, validated against the DLL).
+# auto_derive = true
 #
 # url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
-# url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
+# url_template = "https://fast.jsdelivr.net/gh/huanyuejue/steam-monitor@main/{channel}/{component}/{sha256}.toml"
