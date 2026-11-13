@@ -227,6 +227,7 @@ struct GuiState {
     HFONT font = nullptr;
     HFONT fontBold = nullptr;
     HFONT fontSmall = nullptr;
+    HFONT fontMono = nullptr;
     GuiLanguage language = GuiLanguage::English;
     ThemeMode themeMode = ThemeMode::System;
     Theme theme = MakeLightTheme();
@@ -242,6 +243,7 @@ struct GuiState {
     int hoverId = 0;
     int dpi = 96;
     bool richLog = false;
+    bool logScrollPending = false;
     std::atomic<bool> busy{false};
     std::wstring steamDir;
     std::wstring payloadPath;
@@ -335,6 +337,18 @@ HFONT CreateUiFont(int points, bool bold) {
     return CreateFontW(-MulDiv(points, Dpi(), 72), 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE,
                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                        DEFAULT_PITCH | FF_DONTCARE, UiFontName());
+}
+
+// The log is column-aligned, so it gets a monospaced face when one exists.
+HFONT CreateLogFont() {
+    static const wchar_t* kMono[] = {L"Consolas", L"Cascadia Mono", L"Cascadia Code", L"Lucida Console"};
+    for (const wchar_t* family : kMono) {
+        if (!FontFamilyExists(family)) continue;
+        return CreateFontW(-MulDiv(9, Dpi(), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                           DEFAULT_PITCH | FF_DONTCARE, family);
+    }
+    return CreateUiFont(9, false);
 }
 
 void SetText(HWND control, const std::wstring& text) {
@@ -466,11 +480,18 @@ void ApplyTheme(HWND window, bool recreateBrushes) {
 
     if (g.logView && g.richLog) {
         SendMessageW(g.logView, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(g.theme.log));
-        CHARFORMAT2W format{};
-        format.cbSize = sizeof(format);
-        format.dwMask = CFM_COLOR;
-        format.crTextColor = g.theme.text;
-        SendMessageW(g.logView, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
+        if (recreateBrushes) {
+            // Per-line colours belong to the old palette: drop the text and
+            // re-read the tail from the file so it is painted in the new one.
+            SetWindowTextW(g.logView, L"");
+            g.logOffset = 0;
+        } else {
+            CHARFORMAT2W format{};
+            format.cbSize = sizeof(format);
+            format.dwMask = CFM_COLOR;
+            format.crTextColor = g.theme.text;
+            SendMessageW(g.logView, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
+        }
     }
     if (g.tooltip) {
         SetWindowTheme(g.tooltip, scrollTheme, nullptr);
@@ -490,12 +511,65 @@ void SetStatusRowColor(size_t index, COLORREF color) {
 // ---------------------------------------------------------------------------
 // Log pane
 // ---------------------------------------------------------------------------
-COLORREF ColorForLine(const std::wstring& line) {
-    if (line.find(L"[WARN ]") != std::wstring::npos) return g.theme.warn;
-    if (line.find(L"[ERROR]") != std::wstring::npos) return g.theme.error;
-    if (line.find(L"[DEBUG]") != std::wstring::npos) return g.theme.debug;
-    if (line.find(L"[INFO ]") != std::wstring::npos) return g.theme.info;
-    return g.theme.text;
+COLORREF LevelColor(LogLevel level) {
+    switch (level) {
+        case LogLevel::Detail: return g.theme.debug;
+        case LogLevel::Warn:   return g.theme.warn;
+        case LogLevel::Error:  return g.theme.error;
+        case LogLevel::Info:
+        default:               return g.theme.info;
+    }
+}
+
+// Message colour: only warnings and errors are painted in their colour, so a
+// normal run does not turn the whole pane red or green.
+COLORREF MessageColor(LogLevel level) {
+    switch (level) {
+        case LogLevel::Detail: return g.theme.debug;
+        case LogLevel::Warn:   return g.theme.warn;
+        case LogLevel::Error:  return g.theme.error;
+        case LogLevel::Info:
+        default:               return g.theme.text;
+    }
+}
+
+void ScrollLogToEnd();
+
+void AppendLogSegment(const std::wstring& text, COLORREF color) {
+    if (text.empty()) return;
+    if (g.richLog) {
+        CHARFORMAT2W format{};
+        format.cbSize = sizeof(format);
+        format.dwMask = CFM_COLOR;
+        format.crTextColor = color;
+        SendMessageW(g.logView, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
+    }
+    SendMessageW(g.logView, EM_REPLACESEL, static_cast<WPARAM>(FALSE), reinterpret_cast<LPARAM>(text.c_str()));
+}
+
+// Wrapped lines continue under the message column instead of at the left edge,
+// so the fixed layout survives a narrow window.
+void ApplyLogIndent(long from, long to) {
+    if (!g.richLog || to <= from) return;
+    HDC dc = GetDC(g.logView);
+    if (!dc) return;
+    HGDIOBJ oldFont = SelectObject(dc, g.fontMono ? g.fontMono : g.font);
+    const std::wstring sample(kLogMessageColumn, L'0');
+    SIZE size{};
+    GetTextExtentPoint32W(dc, sample.c_str(), static_cast<int>(sample.size()), &size);
+    SelectObject(dc, oldFont);
+    ReleaseDC(g.logView, dc);
+
+    PARAFORMAT2 format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = PFM_STARTINDENT | PFM_OFFSET;
+    // First line at the left margin, continuation lines under the message
+    // column (dxOffset is relative to dxStartIndent).
+    format.dxStartIndent = 0;
+    format.dxOffset = MulDiv(size.cx, 1440, Dpi());
+
+    SendMessageW(g.logView, EM_SETSEL, static_cast<WPARAM>(from), static_cast<LPARAM>(to));
+    SendMessageW(g.logView, EM_SETPARAFORMAT, 0, reinterpret_cast<LPARAM>(&format));
 }
 
 void AppendLog(const std::vector<std::wstring>& lines) {
@@ -508,20 +582,38 @@ void AppendLog(const std::vector<std::wstring>& lines) {
         SendMessageW(g.logView, EM_REPLACESEL, static_cast<WPARAM>(FALSE), reinterpret_cast<LPARAM>(L""));
     }
 
-    SendMessageW(g.logView, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+    const long start = GetWindowTextLengthW(g.logView);
+    SendMessageW(g.logView, EM_SETSEL, static_cast<WPARAM>(start), static_cast<LPARAM>(start));
     for (const auto& line : lines) {
-        if (g.richLog) {
-            CHARFORMAT2W format{};
-            format.cbSize = sizeof(format);
-            format.dwMask = CFM_COLOR;
-            format.crTextColor = ColorForLine(line);
-            SendMessageW(g.logView, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
+        LogLineParts parts;
+        if (!LogParseLine(line, parts)) {
+            AppendLogSegment(line + L"\r\n", g.theme.text);
+            continue;
         }
-        std::wstring padded = line + L"\r\n";
-        SendMessageW(g.logView, EM_REPLACESEL, static_cast<WPARAM>(FALSE),
-                     reinterpret_cast<LPARAM>(padded.c_str()));
+        // Timestamp and role are metadata and stay dim; the level token and the
+        // message carry the severity colour, so problems are easy to spot.
+        const std::wstring message = parts.messageStart < line.size() ? line.substr(parts.messageStart) : L"";
+        AppendLogSegment(line.substr(0, parts.levelStart), g.theme.subtle);
+        AppendLogSegment(line.substr(parts.levelStart, parts.levelEnd - parts.levelStart),
+                         LevelColor(parts.level));
+        AppendLogSegment(line.substr(parts.levelEnd, parts.messageStart - parts.levelEnd), g.theme.subtle);
+        AppendLogSegment(message, MessageColor(parts.level));
+        AppendLogSegment(L"\r\n", g.theme.text);
     }
+    ApplyLogIndent(start, GetWindowTextLengthW(g.logView));
+
+    ScrollLogToEnd();
+    InvalidateRect(g.logView, nullptr, FALSE);
+}
+
+void ScrollLogToEnd() {
+    if (!g.logView) return;
+    // A read-only rich edit only scrolls when the caret is moved there
+    // explicitly, and only when the control is visible.
+    SendMessageW(g.logView, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+    SendMessageW(g.logView, WM_VSCROLL, MAKEWPARAM(SB_BOTTOM, 0), 0);
     SendMessageW(g.logView, EM_SCROLLCARET, 0, 0);
+    g.logScrollPending = !IsWindowVisible(g.logView);
 }
 
 // Tails ost.log so work done by an elevated instance (a separate process)
@@ -1160,6 +1252,7 @@ void BuildLayout() {
     g.font = CreateUiFont(9, false);
     g.fontBold = CreateUiFont(9, true);
     g.fontSmall = CreateUiFont(8, false);
+    g.fontMono = CreateLogFont();
 
     // Row 1: Steam folder, language, theme.
     CreateChild(L"STATIC", text.steamInstall, SS_LEFT, 12, 12, 124, 18, IdSteamLabel);
@@ -1422,7 +1515,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             BuildLayout();
             if (g.steamValue) SendMessageW(g.steamValue, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
             if (g.payloadValue) SendMessageW(g.payloadValue, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
-            if (g.logView) SendMessageW(g.logView, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+            if (g.logView) SendMessageW(g.logView, WM_SETFONT, reinterpret_cast<WPARAM>(g.fontMono), TRUE);
             if (g.languageCombo) {
                 SendMessageW(g.languageCombo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), Px(20));
                 SendMessageW(g.languageCombo, CB_SETITEMHEIGHT, 0, Px(20));
@@ -1463,6 +1556,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
         case WM_ERASEBKGND:
             return 1;
+
+        case WM_SHOWWINDOW:
+            if (wParam && g.logView) {
+                // The pane is filled before the window exists, so the first
+                // scroll to the newest line has to wait until it is visible.
+                ScrollLogToEnd();
+            }
+            return 0;
 
         case WM_CTLCOLORSTATIC: {
             HDC dc = reinterpret_cast<HDC>(wParam);
@@ -1513,6 +1614,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             if (wParam == kTimerRefresh) {
                 RefreshStatus();
                 DrainLogFile();
+                if (g.logScrollPending) ScrollLogToEnd();
                 // Follow Windows when the user switches theme while we run.
                 if (g.themeMode == ThemeMode::System) {
                     const bool dark = SystemUsesDarkTheme();

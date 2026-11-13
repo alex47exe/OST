@@ -271,6 +271,8 @@ int InstallProxy(const Options& options, ProxyKind kind, const std::wstring& ste
         LogError(L"payload DLL not found: " + payload + L" (build OpenSteamTool.dll or pass --payload)");
         return 1;
     }
+    LogDetail(L"steam: " + steamDir);
+    LogDetail(L"payload: " + payload + L" (" + std::to_wstring(FileSize(payload)) + L" bytes)");
 
     const IfeoStatus ifeo = QueryIfeo();
     if (ifeo.state == IfeoState::InstalledSelf) {
@@ -342,6 +344,9 @@ int CmdInstallIfeo(const Options& options, bool rootMode) {
                  L"; rebuild the bundle (cmake --build build --config Release --target ost-manager)");
         return 1;
     }
+    LogDetail(L"steam: " + steamDir);
+    LogDetail(L"loader: " + loader);
+    LogDetail(L"payload: " + payload + L" (" + std::to_wstring(FileSize(payload)) + L" bytes)");
     if (options.dryRun) {
         LogInfo(std::wstring(L"dry run: would install the ") + (rootMode ? L"Steam-root" : L"portable") +
                 L" IFEO loader for " + payload);
@@ -657,9 +662,23 @@ int CmdAutostart(const Options& options) {
 
 int CmdLog(const Options& options) {
     size_t tail = 60;
+    LogLevel minLevel = LogLevel::Detail;
     for (size_t i = 0; i < options.positional.size(); ++i) {
-        if (IEquals(options.positional[i], L"--tail") && i + 1 < options.positional.size()) {
+        const std::wstring& arg = options.positional[i];
+        if (IEquals(arg, L"--tail") && i + 1 < options.positional.size()) {
             tail = static_cast<size_t>(_wtoi(options.positional[i + 1].c_str()));
+            continue;
+        }
+        if (IEquals(arg, L"--level") && i + 1 < options.positional.size()) {
+            const std::wstring level = ToLower(options.positional[++i]);
+            if (level == L"debug") minLevel = LogLevel::Detail;
+            else if (level == L"info") minLevel = LogLevel::Info;
+            else if (level == L"warn" || level == L"warning") minLevel = LogLevel::Warn;
+            else if (level == L"error") minLevel = LogLevel::Error;
+            else {
+                LogWarn(L"unknown level '" + level + L"': use debug | info | warn | error");
+                return 2;
+            }
         }
     }
     const std::wstring path = LogFilePath().empty() ? SelfDir() + L"\\ost.log" : LogFilePath();
@@ -677,7 +696,18 @@ int CmdLog(const Options& options) {
         lines.push_back(WideFromUtf8(line));
     }
     const size_t start = lines.size() > tail ? lines.size() - tail : 0;
-    for (size_t i = start; i < lines.size(); ++i) EmitRaw(lines[i]);
+    for (size_t i = start; i < lines.size(); ++i) {
+        if (minLevel == LogLevel::Detail) {
+            EmitRaw(lines[i]);
+            continue;
+        }
+        // Lines from an older log format cannot be classified: keep them, they
+        // still belong to the tail the user asked for.
+        LogLineParts parts;
+        if (!LogParseLine(lines[i], parts) || static_cast<int>(parts.level) >= static_cast<int>(minLevel)) {
+            EmitRaw(lines[i]);
+        }
+    }
     return 0;
 }
 
@@ -824,7 +854,9 @@ void PrintHelp() {
         L"  stop-watch                Signal a running watcher to exit\n"
         L"  restart                   Close Steam (-shutdown) and start it again\n"
         L"  autostart on|off          Register the watcher at user logon\n"
-        L"  log [--tail N]            Print the tail of the action log\n"
+        L"  log [--tail N] [--level warn|error]\n"
+        L"                            Print the tail of the action log, optionally only\n"
+        L"                            warnings and errors\n"
         L"  version                   Print the manager version\n"
         L"\n"
         L"Compatibility switches (original ost-manager)\n"

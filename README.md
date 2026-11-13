@@ -107,11 +107,7 @@ The shipped `version.dll` build has a `.disabled` suffix on purpose: `steam.exe`
 | `ost-manager.exe` | CLI, console menu (`--tui`) and windowed manager (double-click or `--ui`) |
 | `ost-loader.exe` | Windowless helper that Windows runs instead of `steam.exe` through IFEO |
 
-<<<<<<< HEAD
 The window shows one entry-point picker with a one-line explanation per method, colour-coded status (green = healthy, amber = attention, red = two entry points), an icon on every action with a tooltip, a colour-coded action log (green info, amber warning, red error) and a Light/Dark/System theme switch stored per user (`HKCU\Software\OpenSteamTool\GuiTheme`). On Windows 11 the window uses the native chrome — rounded corners, the DWM border colour, a dark title bar, Segoe UI Variable and the accent colour from Settings for hover/pressed/focus — and falls back to a plain palette on Windows 10.
-=======
-The window shows one entry-point picker with a one-line explanation per method, colour-coded status (green = healthy, amber = attention, red = two entry points), an icon on every action with a tooltip, a colour-coded action log (green info, amber warning, red error) and a Light/Dark/System theme switch stored per user (`HKCU\Software\OpenSteamTool\GuiTheme`). On Windows 11 the window uses the native chrome — Mica backdrop, rounded corners, DWM border colour, Segoe UI Variable and the accent colour from Settings for hover/pressed/focus — and falls back to the solid palette on Windows 10.
->>>>>>> 2168183b1e1dc6d50148402e0fa6a951bf262ddb
 
 **Exactly one entry point is active at a time.** Every install removes the IFEO key, the other proxy DLLs and their payload copies before deploying its own, and `status` reports how many entry points are live (and warns when more than one is). Leftovers from an earlier install are recognised even when their bookkeeping is gone, so a stale proxy can never keep loading an old payload next to a fresh one.
 
@@ -434,6 +430,29 @@ url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
 ```
 
 ## Logging and troubleshooting
+
+### Tool log (`ost.log`)
+
+`ost-manager.exe` and `ost-loader.exe` share one log file (`ost.log` next to the manager, `--log <path>` to move it, `--no-log-file` to disable it). Every line has the same fixed shape, so the console, the file and the window stay aligned:
+
+```text
+04:05:24.978  INFO   manager  ---- manager 1.5.4.1  pid 10652  standard user ----
+04:05:24.981  DEBUG  manager    steam: C:\Program Files (x86)\Steam
+04:05:24.992  INFO   manager  removed C:\Program Files (x86)\Steam\bin\dwmapi.dll
+04:05:24.998  INFO   manager  deployed C:\Program Files (x86)\Steam\bin\OpenSteamTool.dll
+04:05:25.008  INFO   manager  ---- exit 0 - 0.03 s ----
+04:05:25.145  INFO   loader   ---- loader 1.5.4.1  pid 7372  standard user ----
+04:05:25.186  INFO   loader   payload injected into the suspended process
+```
+
+- `hh:mm:ss.mmm` · level (`DEBUG`/`INFO`/`WARN`/`ERROR`) · role (`manager`/`loader`) · message. Both roles write to the same file, so the column is what tells a Steam start from a command.
+- Every run opens with a ruled header (version, pid, elevation, Windows build as a detail line, the command line) and closes with a ruled `exit <code> - <duration>` line.
+- `--verbose` adds indented `DEBUG` detail lines (resolved paths, payload size, command lines) under the step they belong to.
+- The console uses the same lines with colour when the terminal supports ANSI (Windows 10+); redirected output stays plain text.
+- At 1 MB the file rotates once to `ost.log.1`, so it never grows without bound.
+- `ost-manager.exe log --tail 80 --level warn` prints the tail, optionally only warnings and errors.
+
+### Payload logs
 
 Debug builds write one file per module to `<Steam>\opensteamtool\`; `[log] level` controls the verbosity globally.
 

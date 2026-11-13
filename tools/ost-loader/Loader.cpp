@@ -11,6 +11,10 @@ namespace {
 
 constexpr const wchar_t* kLoaderArg = L"loader";
 
+std::wstring LoaderVersion() {
+    return std::wstring(OST_TOOL_VERSION, OST_TOOL_VERSION + sizeof(OST_TOOL_VERSION) - 1);
+}
+
 bool LooksLikeExe(const std::wstring& value) {
     return IEndsWith(value, L".exe") && FileExists(value);
 }
@@ -146,31 +150,35 @@ int RunLoader(const std::vector<std::wstring>& args) {
     }
 
     LogInitialize(logPath, false, false, true);
-    LogInfo(L"loader: starting (target '" + targetExe + L"')");
+    LogSetRole(L"loader");
+    LogSessionStart(LoaderVersion(), args);
 
     if (GetEnvVar(kIfeoChildEnv) == L"1") {
         // Windows is re-entering us because IFEO still applies to the child; a
         // second launch would fork-bomb steam.exe, so stop here.
-        LogError(L"loader: recursion detected, refusing to relaunch Steam (run 'ost-manager uninstall')");
+        LogError(L"recursion detected, refusing to relaunch Steam (run 'ost-manager uninstall')");
+        LogSessionEnd(4);
         return 4;
     }
 
     if (targetExe.empty() || !IEquals(BaseName(targetExe), L"steam.exe")) {
-        LogError(L"loader: target is not steam.exe, refusing");
+        LogError(L"target is not steam.exe, refusing");
+        LogSessionEnd(2);
         return 2;
     }
 
     const std::wstring steamDir = std::filesystem::path(targetExe).parent_path().wstring();
     if (steamDir.empty()) {
-        LogError(L"loader: cannot resolve the Steam directory");
+        LogError(L"cannot resolve the Steam directory");
+        LogSessionEnd(2);
         return 2;
     }
 
     const std::wstring payload = ResolvePayload(steamDir, explicitPayload);
     if (payload.empty()) {
-        LogWarn(L"loader: no payload DLL found; Steam will start without OpenSteamTool");
+        LogWarn(L"no payload DLL found; Steam will start without OpenSteamTool");
     } else {
-        LogInfo(L"loader: payload " + payload);
+        LogInfo(L"payload: " + payload);
     }
 
     // The child inherits our environment block: the recursion guard keeps a
@@ -188,7 +196,7 @@ int RunLoader(const std::vector<std::wstring>& args) {
     }
 
     std::wstring commandLine = BuildCommandLine(targetExe, forwarded);
-    LogInfo(L"loader: command line " + commandLine);
+    LogDetail(L"command line " + commandLine);
 
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -197,8 +205,9 @@ int RunLoader(const std::vector<std::wstring>& args) {
     if (!CreateProcessW(targetExe.c_str(), commandLine.data(), nullptr, nullptr, FALSE, flags, nullptr,
                         steamDir.c_str(), &startup, &info)) {
         const DWORD error = GetLastError();
-        LogError(L"loader: CreateProcess (debug flag) failed (" + std::to_wstring(error) +
+        LogError(L"CreateProcess (debug flag) failed (" + std::to_wstring(error) +
                  L"); Steam was not started. Run 'ost-manager uninstall' if IFEO cannot be used on this system.");
+        LogSessionEnd(3);
         return 3;
     }
 
@@ -209,16 +218,16 @@ int RunLoader(const std::vector<std::wstring>& args) {
     if (!noInject && !payload.empty()) {
         std::wstring injectionError;
         if (InjectWithHandle(info.hProcess, payload, injectionError)) {
-            LogInfo(L"loader: payload injected before the entry point");
+            LogInfo(L"payload injected into the suspended process");
         } else {
-            LogError(L"loader: injection failed: " + injectionError);
+            LogError(L"injection failed: " + injectionError);
         }
     }
 
     ResumeThread(info.hThread);
     CloseHandle(info.hThread);
     CloseHandle(info.hProcess);
-    LogInfo(L"loader: Steam resumed");
+    LogSessionEnd(0);
     return 0;
 }
 

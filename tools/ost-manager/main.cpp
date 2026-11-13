@@ -27,7 +27,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (windowed) {
         // The window tails the log file; keep it enabled so elevated work is visible.
         ost::LogInitialize(options.logPath, false, true, true);
+        ost::LogSetRole(L"manager");
+        ost::LogSessionStart(ost::ToolVersion(), args);
         const int code = ost::RunGui(options);
+        ost::LogSessionEnd(code);
         ost::LogShutdown();
         return code;
     }
@@ -35,6 +38,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const bool echo = !options.quiet;
     if (echo) ost::ConsoleAttach();
     ost::LogInitialize(options.logPath, echo, options.verbose, !options.noLogFile);
+    ost::LogSetRole(L"manager");
 
     if (help) {
         ost::PrintHelp();
@@ -42,9 +46,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 0;
     }
 
+    ost::LogSessionStart(ost::ToolVersion(), args);
     const bool interactive =
         (options.ui || options.command.empty()) && ost::ConsoleOwned() && ost::ConsoleInteractive();
     const int code = interactive ? ost::RunInteractiveMenu(options) : ost::RunCommand(options);
+    ost::LogSessionEnd(code);
 
     if (options.pause || ost::ConsoleOwned()) ost::ConsolePause();
     ost::LogShutdown();

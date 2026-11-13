@@ -107,11 +107,7 @@
 | `ost-manager.exe` | 命令行、控制台菜单（`--tui`）和窗口管理器（双击或 `--ui`） |
 | `ost-loader.exe` | 无窗口的辅助程序，Windows 通过 IFEO 用它代替 `steam.exe` 启动 |
 
-<<<<<<< HEAD
 窗口中有一个带每种方式说明的入口选择器、按颜色区分状态（绿色 = 正常，琥珀 = 需注意，红色 = 同时存在两个入口）、每个操作都有图标和提示气泡、按级别着色的操作日志（绿色信息、琥珀警告、红色错误），以及按用户保存的浅色/深色/跟随系统主题开关（`HKCU\Software\OpenSteamTool\GuiTheme`）。在 Windows 11 上使用系统原生外观：圆角、DWM 边框色、深色标题栏、Segoe UI Variable 字体，以及「设置」中的强调色用于悬停/按下/焦点；Windows 10 上回退为普通配色。
-=======
-窗口中有一个带每种方式说明的入口选择器、按颜色区分状态（绿色 = 正常，琥珀 = 需注意，红色 = 同时存在两个入口）、每个操作都有图标和提示气泡、按级别着色的操作日志（绿色信息、琥珀警告、红色错误），以及按用户保存的浅色/深色/跟随系统主题开关（`HKCU\Software\OpenSteamTool\GuiTheme`）。在 Windows 11 上使用系统原生外观：Mica 背景、圆角、DWM 边框色、Segoe UI Variable 字体，以及「设置」中的强调色用于悬停/按下/焦点；Windows 10 上回退为纯色配色。
->>>>>>> 2168183b1e1dc6d50148402e0fa6a951bf262ddb
 
 **任何时刻只有一个入口处于激活状态。** 每次安装都会先删除 IFEO 键、其他代理 DLL 及其载荷副本，然后再部署自己；`status` 会显示当前激活的入口数量（多于一个时给出警告）。即使记录已丢失，旧安装残留也能被识别，因此过期的代理绝不会和新载荷同时加载。
 
@@ -434,6 +430,28 @@ url_template = "https://your.server/{channel}/{component}/{sha256}.toml"
 ```
 
 ## 日志与故障排查
+
+### 工具日志（`ost.log`）
+
+`ost-manager.exe` 与 `ost-loader.exe` 共用一个日志文件（默认在管理器旁的 `ost.log`，用 `--log <路径>` 改变位置，`--no-log-file` 关闭）。每行格式固定，控制台、文件和窗口因此完全对齐：
+
+```text
+04:05:24.978  INFO   manager  ---- manager 1.5.4.1  pid 10652  standard user ----
+04:05:24.981  DEBUG  manager    steam: C:\Program Files (x86)\Steam
+04:05:24.998  INFO   manager  deployed C:\Program Files (x86)\Steam\bin\OpenSteamTool.dll
+04:05:25.008  INFO   manager  ---- exit 0 - 0.03 s ----
+04:05:25.145  INFO   loader   ---- loader 1.5.4.1  pid 7372  standard user ----
+04:05:25.186  INFO   loader   payload injected into the suspended process
+```
+
+- `hh:mm:ss.mmm` · 级别（`DEBUG`/`INFO`/`WARN`/`ERROR`）· 角色（`manager`/`loader`）· 消息。两种角色写同一个文件，靠这一列区分 Steam 启动与命令执行。
+- 每次运行以带横线的头部开始（版本、pid、是否提权、Windows 版本作为明细行、命令行），以 `exit <代码> - <耗时>` 结束。
+- `--verbose` 会在对应步骤下增加缩进的 `DEBUG` 明细行（解析出的路径、载荷大小、命令行）。
+- 终端支持 ANSI（Windows 10+）时控制台同样着色；重定向输出保持纯文本。
+- 文件超过 1 MB 时轮换一次为 `ost.log.1`，不会无限增长。
+- `ost-manager.exe log --tail 80 --level warn` 打印尾部，可只显示警告与错误。
+
+### 载荷日志
 
 Debug 构建会为每个模块在 `<Steam>\opensteamtool\` 下写一个日志文件；`[log] level` 全局控制详细程度。
 
