@@ -13,7 +13,7 @@ namespace LuaConfig{
     bool HasDepot(AppId_t appId, bool checkOwned=true);
     bool IsOwned(AppId_t appId);
     void MarkOwned(AppId_t appId);
-    // 是否配过 forcedenuvo(appid)：识别漏判时手动按 Denuvo 处理。
+    // Whether forcedenuvo(appid) was configured: handle the app as Denuvo manually when detection misses it.
     bool IsForcedDenuvo(AppId_t appId);
     std::vector<AppId_t> GetAllDepotIds();
     std::vector<uint8> GetDecryptionKey(AppId_t appId);

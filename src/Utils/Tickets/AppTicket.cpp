@@ -17,15 +17,15 @@
 
 namespace AppTicket {
     constexpr AppId_t kLocalAppTicketSourceAppId = 7;
-    // Steamworks 公共运行库：免费自动装、覆盖极广。第二顺位 donor，
-    // 已实测内存里有有效票（178 字节命中），有票即用，日志标明来源。
+    // Steamworks common redistributable: free auto-install, very wide coverage. Second-choice donor;
+    // measured to hold a valid ticket in memory (178-byte hit). Use it if present and log the source.
     constexpr AppId_t kSysVerifyAppId = 228980;
     constexpr size_t kDonorMaxSize = 65536;
     constexpr size_t kSteamIdTicketMinimumSize = 16;
     constexpr const wchar_t* kRegAppsPath = L"Software\\Valve\\Steam\\Apps";
 
-    // donor 借用的是结构 + 真签名：够大、非占位、首字段非零即可用。
-    // 16B 占位符和垃圾大值直接扔，真假交给 Denuvo 定。
+    // A donor lends only its structure + real signature: big enough, not a placeholder, first field non-zero means usable.
+    // 16B placeholders and garbage oversized values are dropped outright; whether it is genuine is up to Denuvo.
     static bool IsUsableDonor(const std::vector<uint8_t>& t) {
         if (t.size() <= kAppTicketSignatureSize || t.size() > kDonorMaxSize) return false;
         uint32_t head = 0;
@@ -33,8 +33,8 @@ namespace AppTicket {
         return head != 0;
     }
 
-    // 票里 SteamID 的低 32 位就是账号 ID，用它认出这张票是谁的。
-    // 布局与 GetSpoofSteamID 一致：[Size][Version][SteamID]。
+    // The low 32 bits of the SteamID in the ticket are the account ID; use them to tell whose ticket this is.
+    // Layout matches GetSpoofSteamID: [Size][Version][SteamID].
     static uint32_t DonorAccountId(const std::vector<uint8_t>& t) {
         if (t.size() < kSteamIdTicketMinimumSize) return 0;
         uint64_t steamId = 0;
@@ -42,8 +42,8 @@ namespace AppTicket {
         return static_cast<uint32_t>(steamId & 0xFFFFFFFFull);
     }
 
-    // 当前登录账号。拿不到时返回 0，调用方据此退回纯结构校验。
-    // 切号必然重启 Steam，进程内不会有第二个值，不需要缓存失效逻辑。
+    // Currently signed-in account. Returns 0 when unavailable, and the caller falls back to structure-only validation.
+    // Switching accounts always restarts Steam, so there is never a second value in-process; no cache invalidation needed.
     static uint32_t ActiveAccountId() {
         uint32_t accountId = 0;
         std::wstring universe;
@@ -54,17 +54,17 @@ namespace AppTicket {
         return accountId;
     }
 
-    // pin：记住 donor 来源，下次先验 pin（单 IPC 线程，无锁，沿用存量假设）。
+    // pin: remember the donor source so the next call validates the pin first (single IPC thread, lock-free, as before).
     enum class DonorKind { None, Memory, Registry, LocalConfig };
     static DonorKind g_donorKind = DonorKind::None;
     static AppId_t g_donorAppId = 0;
 
-    // localconfig.vdf 里的 apptickets 段是 Steam 自己维护的真票仓库，OST 从不写它。
-    // 注册表那边基本只剩 OST 自己的激活记录，数量级差得很远，所以这里才是活票来源。
-    // 票是 Valve 签的，伪造只需要借尾部的签名，源 appid 与目标无关，任取一张即可。
+    // The apptickets section in localconfig.vdf is Steam's own repository of real tickets; OST never writes it.
+    // The registry side holds mostly OST's own activation records, orders of magnitude fewer, so this is the live ticket source.
+    // Tickets are Valve-signed; forging only borrows the trailing signature, and since the source appid is unrelated to the target, any one will do.
     //
-    // 文件是文本 VDF，结构固定为 "apptickets" { "<appid>" "<hex>" ... }。
-    // 找段用括号配对而不是直接找右括号，避免段里将来出现嵌套时截断。
+    // The file is text VDF with the fixed structure "apptickets" { "<appid>" "<hex>" ... }.
+    // The section is found by brace matching rather than by seeking the closing brace, so future nesting cannot truncate it.
     static bool ParseLocalConfigAppTickets(const std::string& data, uint32_t wantAccount,
                                            AppId_t excludeAppId,
                                            std::vector<uint8_t>& out, AppId_t& appId) {
@@ -85,7 +85,7 @@ namespace AppTicket {
         }
         if (close == std::string::npos) return false;
 
-        // 逐对取 "<appid>" "<hex>"，读到第一张合格的票就停。
+        // Read "<appid>" "<hex>" pairs one at a time, stopping at the first qualifying ticket.
         size_t pos = open;
         auto NextQuoted = [&](std::string& value) -> bool {
             const size_t a = data.find('"', pos);
@@ -113,7 +113,7 @@ namespace AppTicket {
                 if (!std::isxdigit(static_cast<unsigned char>(c))) { allHex = false; break; }
             }
             if (!allHex) continue;
-            // 至少要能容纳尾部签名，否则拼接时会把整张票吃掉。
+            // Must be large enough to hold the trailing signature, otherwise splicing would consume the whole ticket.
             if (hex.size() / 2 <= kAppTicketSignatureSize) continue;
 
             std::vector<uint8_t> bytes;
@@ -123,10 +123,10 @@ namespace AppTicket {
             }
             if (!IsUsableDonor(bytes)) continue;
 
-            // 家庭共享来的票带的是出借者的 SteamID，拿去拼接必然报 54。
-            // 调用方按 wantAccount 过滤，wantAccount 为 0 表示不限。
+            // A ticket from Family Sharing carries the lender's SteamID; splicing it always fails with 54.
+            // The caller filters by wantAccount, where wantAccount == 0 means no restriction.
             const AppId_t parsedApp = static_cast<AppId_t>(strtoul(key.c_str(), nullptr, 10));
-            // 目标游戏自己跳过：它要是有票就不会走到 forge，拿它当基底只会自杀。
+            // Skip the target game itself: if it had a ticket we would never reach forge, so using it as the base would be self-defeating.
             if (parsedApp == excludeAppId) continue;
             if (wantAccount != 0) {
                 const uint32_t ticketAccount = DonorAccountId(bytes);
@@ -144,7 +144,7 @@ namespace AppTicket {
         return false;
     }
 
-    // accountId 为 0 时读当前登录账号；非 0 时读指定账号的目录。
+    // accountId == 0 reads the currently signed-in account; non-zero reads that account's directory.
     static bool ReadLocalConfigDonor(uint32_t accountId, AppId_t excludeAppId,
                                      std::vector<uint8_t>& out, AppId_t& appId) {
         out.clear();
@@ -172,8 +172,8 @@ namespace AppTicket {
         return true;
     }
 
-    // excludeAppId 只对 LocalConfig 有意义：那边按文件内容重新解析，需要知道
-    // 目标游戏是谁才能跳过它。Memory/Registry 按 appid 直取，天然不会取到目标。
+    // excludeAppId only matters for LocalConfig: that path re-parses file contents and needs to know
+    // which game is the target in order to skip it. Memory/Registry look up by appid directly and never hit the target.
     static bool ReadDonor(DonorKind kind, AppId_t donorAppId, AppId_t excludeAppId,
                           std::vector<uint8_t>& out) {
         out.clear();
@@ -187,7 +187,7 @@ namespace AppTicket {
                 out = std::move(t);
             }
         } else if (kind == DonorKind::LocalConfig) {
-            // 只认这一张：pin 里记的 appid 换了就作废，调用方会重新走全链扫描。
+            // Accept only this one: if the pinned appid changed it is invalidated and the caller reruns the full scan.
             std::vector<uint8_t> t;
             AppId_t appId = 0;
             if (!ReadLocalConfigDonor(ActiveAccountId(), excludeAppId, t, appId)) return false;
@@ -197,17 +197,17 @@ namespace AppTicket {
         return IsUsableDonor(out);
     }
 
-    // 扫描顺序：pin → 内存 7 → 内存 228980（验证位）→ localconfig → 注册表全枚举。
-    // 目标游戏自己跳过（它有票就不会进 forge）。donor 字节不落盘，
-    // 落到目标名下会污染该游戏的 spoof 身份。
+    // Scan order: pin → memory 7 → memory 228980 (verification slot) → localconfig → full registry enumeration.
+    // The target game itself is skipped (it would never reach forge if it had a ticket). Donor bytes never touch disk,
+    // because landing under the target name would pollute that game's spoof identity.
     //
-    // localconfig.vdf 是本账号真票的主要来源，票里带的就是本账号 SteamID，
-    // 用它做基底不需要再对齐身份。注册表留作最后兜底：那边多半只剩 OST
-    // 自己的激活记录，池子账号连真票都没有时只能靠它。
+    // localconfig.vdf is the main source of real tickets for this account, and the ticket carries this account's SteamID,
+    // so using it as the base needs no further identity alignment. The registry is the final fallback: it usually
+    // holds only OST's own activation records, and pool accounts with no real ticket at all can only rely on it.
     //
-    // 分两轮：第一轮只收当前登录账号名下的票，第二轮才放宽到任意可用票。
-    // 宽松轮里 localconfig 仍只读本账号目录，跨账号的票身份对不上，
-    // 拿来做基底只会把 54 报得更早。
+    // Two passes: the first accepts only tickets under the signed-in account, the second relaxes to any usable ticket.
+    // In the lenient pass localconfig still reads only this account's directory, because cross-account tickets have
+    // mismatched identities and using them as the base would only surface 54 sooner.
     static bool FindDonorAppTicket(AppId_t excludeAppId, std::vector<uint8_t>& out, AppId_t& donorAppId) {
         const uint32_t activeAccount = ActiveAccountId();
 
@@ -251,9 +251,9 @@ namespace AppTicket {
             return false;
         };
 
-        // localconfig 只能读本账号目录：目录本身就按账号分隔，跨账号的票
-        // 带的是别人的 SteamID，做基底只会把身份冲突报得更早。因此它不进宽松轮，
-        // 第一轮没命中就不必再试，省一次整文件读取。
+        // localconfig can only read this account's directory: the directories are split per account, and cross-account
+        // tickets carry someone else's SteamID, so using them as the base would only surface the identity conflict sooner.
+        // It therefore stays out of the lenient pass; a miss in the first pass needs no retry and saves one whole-file read.
         auto TryLocalConfig = [&]() -> bool {
             if (activeAccount == 0) return false;
             std::vector<uint8_t> ticket;
@@ -303,7 +303,7 @@ namespace AppTicket {
         out.clear();
         donorAppId = 0;
 
-        // pin 先验：上次选中的来源优先，省掉重复全扫。
+        // Validate the pin first: prefer the source picked last time and skip a repeated full scan.
         if (g_donorKind != DonorKind::None && g_donorAppId != excludeAppId) {
             if (TryAccept(g_donorKind, g_donorAppId)) {
                 return true;

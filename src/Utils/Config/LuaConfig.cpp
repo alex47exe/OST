@@ -29,7 +29,7 @@ namespace LuaConfig{
     std::unordered_map<uint64_t, ManifestOverride> ManifestOverrides{};
     std::unordered_map<AppId_t, uint64_t> StatSteamIdSet{};
     std::unordered_set<AppId_t> OwnedAppIdSet{};
-    // forcedenuvo(appid)：识别漏判时手动指定该游戏按 Denuvo 处理。
+    // forcedenuvo(appid): manually mark this game as Denuvo when detection misses it.
     std::unordered_set<AppId_t> ForcedDenuvoSet{};
 
     // Per-file tracking: which depots each .lua file contributed.
@@ -445,8 +445,9 @@ namespace LuaConfig{
 
     // ── Lua: forcedenuvo ────────────────────────────────────────
     static int lua_forcedenuvo(lua_State* L) {
-        // forcedenuvo(appid) — 识别没认出来的 D 加密游戏用这个手动指定，
-        // 跳过保护扫描直接按 Denuvo 走授权。只影响识别，不改授权行为。
+        // forcedenuvo(appid) — use this to manually mark a Denuvo game that was not
+        // detected, skipping the protection scan and going straight to Denuvo authorization.
+        // It only affects detection, not authorization behavior.
         if (lua_gettop(L) < 1 || !lua_isinteger(L, 1))
             return luaL_error(L, "forcedenuvo requires (appid: integer)");
         lua_Integer val = lua_tointeger(L, 1);

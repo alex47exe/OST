@@ -152,8 +152,10 @@ namespace {
     }
 
     void EnsureScanned(ProcessAuth& auth, const ProcessKey& process, AppId_t appId) {
-        // 手动指定每次都看：lua 是热重载的，游戏跑起来之后再补配置也要能生效，
-        // 不能因为首次扫描结果已缓存就永久忽略。只升不降，避免识别结果来回翻。
+        // The manual override is checked every time: the lua config is hot-reloaded, so a
+        // configuration added after the game is running must still take effect. A cached first
+        // scan result must not suppress it forever. Upgrade only, never downgrade, so the
+        // detection result does not flip back and forth.
         if (LuaConfig::IsForcedDenuvo(appId)) {
             if (!auth.denuvo) {
                 auth.denuvo = true;

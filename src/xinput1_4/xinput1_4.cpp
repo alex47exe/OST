@@ -120,12 +120,13 @@ extern "C" {
 }
 
 // ─── 4. OpenSteamTool Injection ───────────────────────────────────
-// 只在宿主是 steam.exe 时注入（不区分大小写）；本体按自身所在目录绝对
-// 路径加载（与 version.dll 代理同规则），不依赖 DLL 搜索顺序。
+// Inject only when the host process is steam.exe (case-insensitive); the payload loads by
+// absolute path from this module's own directory (same rule as the version.dll proxy), no search order.
 BOOL OpenSteamToolLoad(HMODULE selfModule) {
     char exePath[MAX_PATH];
     const DWORD exeLen = GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    // 拿不到宿主名或路径被截断（文件名不可信）就放弃注入：宁可漏注也不错杀。
+    // If the host name is unavailable or the path was truncated (unreliable filename), skip
+    // injection: better to miss an injection than to kill the wrong process.
     if (exeLen == 0 || exeLen >= MAX_PATH)
         return TRUE;
     const char* exeName = strrchr(exePath, '\\');
@@ -149,7 +150,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
         LoadRealXInput();
-        // 本体缺失也只放弃注入，绝不返回 FALSE 连累宿主（与 version.dll 代理同规则）。
+        // A missing payload only skips injection; never return FALSE and drag the host
+        // down with it (same rule as the version.dll proxy).
         OpenSteamToolLoad(hModule);
         break;
     }

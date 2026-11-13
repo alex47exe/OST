@@ -6,9 +6,11 @@
 namespace OSTPlatform::Dialog {
 
 void ShowWarning(std::string title, std::string message) {
-    // 文案是 UTF-8，MessageBoxA 会按系统 ANSI 代码页（中文系统 GBK）解码，
-    // 中文必乱码。转 UTF-16 走 MessageBoxW，全 locale 正确显示。
-    // 临时量的 c_str 在完整表达式内有效，MessageBoxW 同表达式内用完，安全。
+    // The text is UTF-8 and MessageBoxA decodes it with the system ANSI code page (GBK on
+    // Chinese systems), so Chinese text would inevitably be garbled. Convert to UTF-16 and go
+    // through MessageBoxW to display correctly in every locale.
+    // The temporary c_str stays alive for the full expression and MessageBoxW consumes it
+    // within that same expression, so it is safe.
     MessageBoxW(nullptr,
                 Encoding::Utf8ToWide(message).c_str(),
                 Encoding::Utf8ToWide(title).c_str(),

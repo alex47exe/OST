@@ -1,29 +1,29 @@
-// dwmapi.dll HiJack Project - loader-stage agent (反作弊友好入口)。
+// dwmapi.dll HiJack Project - loader-stage agent (anti-cheat friendly entry point).
 //
-// 职责与 version.dll 代理一致：把 OpenSteamTool.dll 带进 steam.exe 进程。
-// 差别在加载路径——version 是 steam.exe 的静态导入，随加载器最先进入；
-// dwmapi 走 bin\vgui2_s.dll 的静态导入，Steam 起界面时被连带加载。
+// Same duty as the version.dll proxy: bring OpenSteamTool.dll into the steam.exe process.
+// The difference is the load path — version is a static import of steam.exe and enters first
+// with the loader; dwmapi comes in through bin\vgui2_s.dll's static import when Steam starts its UI.
 //
-// 本模块处在 Steam 的关键加载路径上：导出的每个函数都必须原样转发回系统
-// dwmapi，否则依赖它的模块（vgui2_s 调用 DwmExtendFrameIntoClientArea /
-// DwmSetWindowAttribute）会缺符号、整个模块加载失败，Steam 直接起不来
-// （表现为 VGUI_Setup failed）。
+// This module sits on Steam's critical load path: every exported function must be forwarded
+// verbatim to the system dwmapi, otherwise modules that depend on it (vgui2_s calls
+// DwmExtendFrameIntoClientArea / DwmSetWindowAttribute) hit missing symbols, the whole module
+// fails to load, and Steam won't start at all (manifesting as VGUI_Setup failed).
 //
-// 为什么不用 MSVC 的 /EXPORT:名字=DWMAPI.名字 转发器：转发器记录的目标模块名
-// "DWMAPI" 会被加载器解析成模块 dwmapi.dll，而本模块自己就叫这个名字——
-// 命中应用目录里的自己形成自环，vgui2_s 必然加载失败。所以这里改成运行期
-// GetProcAddress 取系统 dwmapi 的真实地址，再逐个手动转发。
+// Why not use MSVC's /EXPORT:Name=DWMAPI.Name forwarders: the loader resolves the recorded target
+// module name "DWMAPI" to the module dwmapi.dll, which is this very module — it hits itself in the
+// application directory and forms a self-loop, so vgui2_s always fails to load. Hence we resolve
+// the real system dwmapi addresses at runtime via GetProcAddress and forward each one by hand.
 
 #include <windows.h>
 
-// 系统真身必须以绝对路径绑定：按名 LoadLibrary("dwmapi.dll") 会命中本模块自己。
+// The real system module must be bound by absolute path: LoadLibrary("dwmapi.dll") by name hits this module itself.
 static HMODULE g_hRealDwmapi = nullptr;
 
-// 系统 dwmapi 各导出函数的真实地址。缺任何一项都只在调用处兜底返回失败，
-// 绝不让转发路径抛异常或崩掉宿主——本模块是 Steam 静态导入链的一环。
-// 故意不导出 DllCanUnloadNow / DllGetClassObject：dwmapi 的 COM 对象经注册表
-// 解析到 System32 的原版，永远不会走我们这份副本，导出它们只会与 combaseapi.h
-// 的既有声明（REFCLSID/REFIID 引用形参）撞签名。
+// Real addresses of each system dwmapi export. A missing entry only makes the call site fall back
+// to failure; the forwarding path must never throw or crash the host — this module is a link in
+// Steam's static import chain. DllCanUnloadNow / DllGetClassObject are deliberately not exported:
+// dwmapi's COM objects resolve via the registry to the System32 original and never reach this copy,
+// so exporting them would only clash with the existing combaseapi.h declarations (REFCLSID/REFIID).
 static FARPROC p_DwmAttachMilContent = nullptr;
 static FARPROC p_DwmDefWindowProc = nullptr;
 static FARPROC p_DwmDetachMilContent = nullptr;
@@ -58,7 +58,8 @@ static FARPROC p_DwmUpdateThumbnailProperties = nullptr;
 
 static void EnsureRealDwmapi()
 {
-    // magic static：只初始化一次且线程安全，多线程首次并发调用也只加载一次真身。
+    // magic static: initialized exactly once and thread-safe; concurrent first calls from
+    // several threads still load the real module only once.
     static const bool ready = [] {
         char realPath[MAX_PATH + 16] = {};
         if (!GetSystemDirectoryA(realPath, MAX_PATH))
@@ -107,9 +108,10 @@ static void EnsureRealDwmapi()
     (void)ready;
 }
 
-// 转发宏：按系统 dwmapi 的原始签名声明导出，调用时强转到同签名函数指针。
-// 结构体指针一律用 void*/const void*：x64 下参数只按指针宽度传递，ABI 完全一致，
-// 也就不必把 Dwmapi 内部的结构体定义搬进来。导出名与序数见 dwmapi.def。
+// Forwarding macro: declares the export with the system dwmapi's original signature and casts to a
+// same-signature function pointer on call. Struct pointers are always void*/const void*: on x64
+// arguments travel purely at pointer width, so the ABI is identical and Dwmapi's internal struct
+// definitions need not be pulled in. Export names and ordinals are in dwmapi.def.
 #define OST_FORWARD_DWM(Ret, Name, Params, Args, FailValue)               \
     extern "C" Ret WINAPI Name Params                                     \
     {                                                                     \
@@ -182,12 +184,13 @@ OST_FORWARD_DWM(HRESULT, DwmUpdateThumbnailProperties, (HANDLE hThumbnailId, con
 #undef OST_FORWARD_DWM
 
 // ─── OpenSteamTool injection ──────────────────────────────────────
-// 只在宿主是 steam.exe 时注入（不区分大小写）；其它进程放行不注入。
+// Inject only when the host process is steam.exe (case-insensitive); other processes pass through.
 static void OpenSteamToolLoad(HMODULE selfModule)
 {
     char exePath[MAX_PATH] = {};
     const DWORD exeLen = GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    // 拿不到宿主名或路径被截断（文件名不可信）就放弃注入：宁可漏注也不错杀。
+    // If the host name is unavailable or the path was truncated (unreliable filename), skip
+    // injection: better to miss an injection than to kill the wrong process.
     if (exeLen == 0 || exeLen >= MAX_PATH)
         return;
     const char* exeName = strrchr(exePath, '\\');
@@ -195,8 +198,8 @@ static void OpenSteamToolLoad(HMODULE selfModule)
     if (_stricmp(exeName, "steam.exe") != 0)
         return;
 
-    // 按自身所在目录定位本体：不依赖 DLL 搜索顺序，也隔绝同目录之外的
-    // 同名文件劫持（CWD/PATH 里塞假体）。代理放哪，本体就在哪。
+    // Locate the payload via this module's own directory: no reliance on DLL search order, and
+    // same-named files planted elsewhere (CWD/PATH) can't hijack it. Payload follows the proxy.
     char selfPath[MAX_PATH + 16] = {};
     const DWORD selfLen = GetModuleFileNameA(selfModule, selfPath, MAX_PATH);
     if (selfLen == 0 || selfLen >= MAX_PATH)
@@ -214,8 +217,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
     {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
-        // 本模块是 Steam 加载链的一环：这里返回 FALSE 会连累调用方模块加载失败。
-        // OpenSteamTool 载不进来（被杀软拦截、副本损坏）也只是放弃注入，放行 Steam。
+        // This module is a link in Steam's load chain: returning FALSE here drags the calling
+        // module's load down with it. If OpenSteamTool can't load (blocked by AV, corrupted copy)
+        // we only skip injection and let Steam run.
         OpenSteamToolLoad(hModule);
         break;
     case DLL_THREAD_ATTACH:

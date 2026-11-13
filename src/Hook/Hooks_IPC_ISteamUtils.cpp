@@ -30,8 +30,10 @@ namespace {
     //  GetAppID reads and updates the response steamclient pre-filled.
     void HandlerPost_IClientUtils_GetAppID(CPipeClient* pipe, CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
-        // P2P 起来之后保持 480：联机会话证书按 480 签发，再改回真实 appid 会对不上。
-        // 本次启动配了 -realappid 时该判断恒为 false，仍然如实回答真实 appid。
+        // Keep 480 once P2P has started: the multiplayer session certificate is
+        // issued for 480, and switching back to the real appid would not match.
+        // This check is always false when -realappid was passed for this launch, so
+        // the real appid is reported as-is.
         if (Hooks_Misc::ShouldReportOnlineFixAppId()) return;
 
         AppId_t realAppId = Hooks_Misc::ResolveAppId();

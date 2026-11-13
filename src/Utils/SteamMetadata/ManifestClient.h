@@ -7,18 +7,20 @@
 //  Provider table is internal (see kProviders in ManifestClient.cpp);
 //  adding a new provider only requires one row there.
 //
-//  从配置的首选源起算顺位回退：失败尝试下一个，刚失败的源在
-//  冷却期内直接跳过；首选源恒等于配置值，成功不改写。
+//  Ordered failover starts from the configured preferred source: on failure
+//  try the next one, and skip a just-failed source while it is cooling down;
+//  the preferred source always equals the configured value and is never
+//  rewritten by a success.
 //
 //  Thread-safe — provider state is guarded by a short-held mutex that
 //  never spans I/O; HTTP requests run concurrently.
 // ─────────────────────────────────────────────────────────────────
 namespace ManifestClient {
 
-    // 单次取码总预算：全部回退尝试共享，hook 等待比它多 1 秒。
+    // Total budget for one fetch: shared by every failover attempt; the hook waits 1 second longer.
     constexpr uint32_t kFetchBudgetMs = 15000;
 
-    // 单源失败后的跳过时长，避免每个 depot 重复支付超时。
+    // How long a source is skipped after it fails, so every depot does not pay the timeout again.
     constexpr uint32_t kProviderCooldownMs = 60000;
 
     // Select the active provider by its string name (matches kProviders[i].name).
@@ -28,7 +30,7 @@ namespace ManifestClient {
     // Name of the currently active provider (for logging / diagnostics).
     const char* ActiveProviderName();
 
-    // 顺位回退总开关（对应 [manifest] failover），热加载实时生效。
+    // Master ordered-failover switch (maps to [manifest] failover); takes effect immediately on hot reload.
     void SetFailoverEnabled(bool enabled);
     bool IsFailoverEnabled();
 

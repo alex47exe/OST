@@ -8,23 +8,26 @@ namespace Hooks_SteamUI {
     void Install();
     void Uninstall();
 
-    // Diversion 劫持是否就绪（LoadModuleWithPath pattern 是否命中）。
-    // 没命中 = 无法把 Steam 重定向到影子模块，此时必须回退原版，
-    // 否则 client hook 全打在没人用的副本上，解锁会静默全灭。
+    // Whether the diversion hijack is ready (whether the LoadModuleWithPath pattern hit).
+    // A miss = Steam cannot be redirected to the shadow module, so we must fall back to the
+    // original; otherwise every client hook lands on an unused copy and unlock dies silently.
     bool IsDiversionRedirectArmed();
 
-    // 首载抢劫（1791）：Steam 不再走 LoadModuleWithPath 拿 steamclient，
-    // 而是启动期直接 LoadLibraryExW。diversion 就绪后把 kernel32 的首载也挂上，
-    // 抢到就是隔离生效；来晚了（首载已发生）它自然打空，不影响现有流程。
-    // 顺带罩住 GetProcAddress：晚绑定取原版导出的一律改道副本，默认透传。
+    // First-load hijack (1791): Steam no longer fetches steamclient through
+    // LoadModuleWithPath but calls LoadLibraryExW directly during startup. Once diversion is
+    // ready, kernel32's first load is hooked as well: stealing it means isolation is active;
+    // if we are too late (first load already happened) the hook simply misses and nothing
+    // changes. GetProcAddress is covered too: late-bound lookups of the original exports are
+    // redirected to the copy, everything else passes through by default.
     void InstallFirstLoadRedirect();
 
-    // 首载抢劫是否已武装（kernel32 LoadLibrary hook 是否装上）。
-    // 与 IsDiversionRedirectArmed 合起来判断"隔离是否还有换机路径"：
-    // 两条路都没了才该回退原版。
+    // Whether the first-load hijack is armed (whether the kernel32 LoadLibrary hook is installed).
+    // Together with IsDiversionRedirectArmed it answers "does isolation still have a redirect
+    // path left": only when both paths are gone should we fall back to the original.
     bool IsFirstLoadRedirectArmed();
 
-    // 我们自己要 Load 原版时（回退）必须短暂 bypass，不然 Load 会被劫回副本。
+    // Must be bypassed briefly when we load the original ourselves (fallback), otherwise
+    // the load gets hijacked back to the copy.
     void SetFirstLoadRedirectBypass(bool bypass);
 
     // Queues an appId for removal from the library UI

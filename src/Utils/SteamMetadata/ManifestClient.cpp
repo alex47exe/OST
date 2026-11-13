@@ -40,7 +40,7 @@ namespace ManifestClient {
     // Adding a new provider: add one row to kProviders below.
     // host / port / tls / path are all derived from the URL template
     // by Make() at compile time.
-    // 表顺序即顺位回退顺序，首行须为默认首选源。
+    // Table order is the ordered-failover order; the first row must be the default preferred source.
 
     struct Provider {
         std::string_view name;          // matches [manifest] url = "..."
@@ -70,22 +70,23 @@ namespace ManifestClient {
 
     // ── provider state ────────────────────────────────────────────
     //
-    // 该锁仅保护下标与冷却表等纯内存状态，持锁期间不做
-    // HTTP 或 Lua 调用，避免挂掉的上游阻塞并发 depot。
+    // This lock only guards in-memory state such as the active index and the cooldown
+    // table; no HTTP or Lua calls are made while holding it, so a dead upstream cannot
+    // block concurrent depots.
 
     static std::mutex g_stateMutex;
 
-    // 配置指定的首选源下标，回退永远从它开始，成功不会改写它。
+    // Index of the configured preferred source; failover always starts here and success never rewrites it.
     static size_t g_active = 0;                            // 20770407
 
-    // 各源失败截止点；未来时间之前该源直接跳过，不再支付超时。
+    // Per-source failure deadline; before it passes the source is skipped, so no timeout is paid again.
     static std::chrono::steady_clock::time_point g_deadUntil[kProviderCount];
 
-    // 各源成功计数：并发取码时失败可能晚于成功到达，用它比对能
-    // 识别过期失败，避免把刚被证明活着的源误判进冷却。
+    // Per-source success counter: with concurrent fetches a failure can arrive after a success,
+    // so comparing against it detects stale failures and keeps a just-proven-live source out of cooldown.
     static uint64_t g_okSeq[kProviderCount] = {};
 
-    // 顺位回退总开关，对应 [manifest] failover。
+    // Master ordered-failover switch, maps to [manifest] failover.
     static bool g_failoverEnabled = true;
 
     static size_t ActiveIndex() {
@@ -103,7 +104,7 @@ namespace ManifestClient {
         return g_deadUntil[i] > now;
     }
 
-    // 请求发出前采样，失败回写时比对。
+    // Snapshot before the request is sent; compared when a failure is written back.
     static uint64_t OkSeq(size_t i) {
         std::lock_guard<std::mutex> lock(g_stateMutex);
         return g_okSeq[i];
@@ -111,7 +112,7 @@ namespace ManifestClient {
 
     static void MarkFailed(size_t i, std::chrono::steady_clock::time_point now, uint64_t seq) {
         std::lock_guard<std::mutex> lock(g_stateMutex);
-        // 采样之后已有成功到达，这次失败描述的是过期状态，直接丢弃。
+        // A success landed after the snapshot, so this failure describes stale state; discard it.
         if (g_okSeq[i] != seq) {
             LOG_MANIFEST_DEBUG("Manifest {} failure ignored (superseded by a success)",
                                kProviders[i].name);
@@ -120,7 +121,7 @@ namespace ManifestClient {
         g_deadUntil[i] = now + std::chrono::milliseconds(kProviderCooldownMs);
     }
 
-    // 记录该源存活并清除其冷却，不改写首选下标。
+    // Record that the source is alive and clear its cooldown; the preferred index is not rewritten.
     static void RecordSuccess(size_t i) {
         std::lock_guard<std::mutex> lock(g_stateMutex);
         ++g_okSeq[i];
@@ -131,12 +132,12 @@ namespace ManifestClient {
         std::lock_guard<std::mutex> lock(g_stateMutex);
         for (size_t i = 0; i < kProviderCount; ++i)
             if (kProviders[i].name == name) {
-                // 同名重选视为无操作：toml 任意改动都会触发全量重载，
-                // 在这里清冷却会把已知挂掉的源重新送回首发位置。
+                // Re-selecting the same name is a no-op: any toml change triggers a full reload, and
+                // clearing cooldowns here would send a known-dead source back to the front of the queue.
                 if (i == g_active) return true;
                 g_active = i;
-                // 只为新选中的源清除冷却并递增序号，其余源的冷却结论保留；
-                // 在途失败不覆盖本次切换。
+                // Only the newly selected source has its cooldown cleared and sequence bumped; other sources keep their
+                // cooldown verdicts, and in-flight failures do not override this switch.
                 g_deadUntil[i] = {};
                 ++g_okSeq[i];
                 return true;
@@ -148,7 +149,7 @@ namespace ManifestClient {
         std::lock_guard<std::mutex> lock(g_stateMutex);
         if (g_failoverEnabled == enabled) return;
         g_failoverEnabled = enabled;
-        // 开关翻转后旧冷却结论不再可信，直接清掉从干净状态起算。
+        // After the switch flips, old cooldown verdicts are no longer trustworthy; clear them and start clean.
         for (auto& t : g_deadUntil) t = {};
     }
 
@@ -169,7 +170,7 @@ namespace ManifestClient {
 
     // ── fetch ─────────────────────────────────────────────────────
 
-    // 对单个源发起一次请求；超时由调用方按预算钳制好再传入。
+    // Issue one request to a single source; the caller clamps the timeouts to the budget before passing them in.
     static bool FetchFrom(const Provider& p, uint64_t gid, AppId_t depotId, uint64_t* outCode,
                           uint32_t resolveMs, uint32_t connectMs, uint32_t sendMs, uint32_t recvMs) {
         char urlLog[256];
@@ -200,7 +201,7 @@ namespace ManifestClient {
         return p.parse(r.body, outCode);
     }
 
-    // 开关关闭时仅请求首选源，不回退。
+    // With the switch off, only the preferred source is requested; no failover.
     static bool FetchActive(uint64_t gid, uint64_t* outCode, AppId_t depotId = 0) {
         const Provider& p = kProviders[ActiveIndex()];
         const Config::ManifestTimeouts timeouts = Config::GetManifestTimeouts();
@@ -208,14 +209,15 @@ namespace ManifestClient {
                          timeouts.resolve, timeouts.connect, timeouts.send, timeouts.recv);
     }
 
-    // 从首选源起算环形遍历全表：冷却中跳过，缺 depotId 时跳过
-    // needsDepot 源（不记失败），预算耗尽即停；全表冷却则直接返回。
+    // Walk the whole table in a ring starting at the preferred source: skip sources in cooldown, skip
+    // needsDepot sources when depotId is missing (without recording a failure), and stop once the budget is
+    // gone; if the whole table is cooling down, return immediately.
     static bool FetchWithFailover(uint64_t gid, uint64_t* outCode, AppId_t depotId = 0) {
         const Config::ManifestTimeouts timeouts = Config::GetManifestTimeouts();
         const auto deadline = std::chrono::steady_clock::now()
                             + std::chrono::milliseconds(kFetchBudgetMs);
 
-        // 起点只快照一次，并发取码中途改首选不影响本次遍历顺序。
+        // Snapshot the start index once; a concurrent preferred-source change does not affect this traversal order.
         const size_t start = ActiveIndex();
 
         size_t tried = 0;
@@ -233,11 +235,11 @@ namespace ManifestClient {
                 continue;
             }
 
-            // 请求发出前采样成功计数，失败回写时比对，过滤过期失败。
+            // Snapshot the success counter before sending and compare it when a failure is written back, filtering stale failures.
             const uint64_t seq = OkSeq(i);
 
-            // 单次尝试不得超过剩余预算：hook 只等到预算+1秒，
-            // 更慢的应答对 Steam 已无意义，只会拖住下一个 depot。
+            // A single attempt must not exceed the remaining budget: the hook only waits budget+1s, and
+            // a slower reply is useless to Steam while it holds up the next depot.
             const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - now).count();
             if (left <= 0) {
@@ -245,8 +247,8 @@ namespace ManifestClient {
                                   gid, kFetchBudgetMs, tried);
                 break;
             }
-            // 上下钳制：不超剩余预算，且不低于 1ms——WinHTTP 会把
-            // 零超时读成无限等待，单次尝试就会跑穿 hook 的等待窗口。
+            // Clamp both ends: never above the remaining budget and never below 1ms — WinHTTP reads
+            // a zero timeout as an infinite wait, so one attempt would blow through the hook's wait window.
             const auto cap = [left](uint32_t ms) {
                 return static_cast<uint32_t>(
                     std::max<int64_t>(1, std::min<int64_t>(ms, left)));
@@ -272,12 +274,12 @@ namespace ManifestClient {
 
     // ── public ────────────────────────────────────────────────────
 
-    // LuaConfig 只暴露一个共享 lua_State 且内部不加锁，并发取码必须
-    // 在这里串行；锁只覆盖 Lua 段，网络 I/O 开始前释放。
+    // LuaConfig exposes a single shared lua_State and does not lock internally, so concurrent fetches must be
+    // serialized here; the lock covers only the Lua section and is released before network I/O starts.
     static std::mutex g_luaMutex;
 
-    // Lua 产出取码即返回 true，调用方否则继续走 HTTP；独立成函数
-    // 是为了让锁在发包前释放。
+    // If Lua yields a code, return true and the caller does not fall through to HTTP; this is a separate
+    // function so the lock is released before the request goes out.
     static bool TryLua(uint64_t manifestGid, uint64_t* outRequestCode,
                        AppId_t appId, AppId_t depotId)
     {

@@ -42,22 +42,25 @@ namespace {
     };
     std::vector<ResolvedHandler> g_Handlers;
 
-    // IClientUtils::GetAppID 的 funcHash，注册时填。onlinefix 的 480 翻转要靠
-    // 这个接口在 appid 不在 Lua 名单的情况下也照常分发，其余 handler 不放行。
+    // funcHash of IClientUtils::GetAppID, filled in at registration. The onlinefix
+    // 480 flip relies on this interface still being dispatched when the appid is
+    // not in the Lua list; all other handlers stay gated.
     uint32 g_onlineFixAppIdHash = 0;
 
-    // 带壳启动器里内嵌的是旧版函数 hash，和新版 Steam 客户端对不上。
-    // 收到那个值时按票据方法处理，否则调用会落到未处理分支，取不到票据。
+    // The packed launcher embeds a legacy function hash that does not match the
+    // current Steam client. Treat that value as the ticket method, otherwise the
+    // call falls into the unhandled branch and no ticket is obtained.
     uint32 g_legacyTicketHash = 0;
-    // 存下标不存指针：g_Handlers 是 vector，后续再添加会搬移元素，指针会失效。
-    // 取最大值表示还没登记过。
+    // Store an index, not a pointer: g_Handlers is a vector and later additions
+    // move elements, invalidating pointers. The maximum value means "not registered yet".
     size_t g_legacyTicketIndex = static_cast<size_t>(-1);
 
     static ResolvedHandler* FindHandler(EIPCInterface iface, uint32 funcHash) {
         for (auto& e : g_Handlers) {
             if (e.interfaceID == iface && e.funcHash == funcHash) return &e;
         }
-        // 旧版 hash 兜底：外壳硬编码的是老值，映射到当前的票据处理器上。
+        // Legacy hash fallback: the packer hardcodes the old value; map it onto
+        // the current ticket handler.
         if (funcHash == g_legacyTicketHash && g_legacyTicketIndex < g_Handlers.size()) {
             ResolvedHandler& e = g_Handlers[g_legacyTicketIndex];
             if (e.interfaceID == iface) return &e;
@@ -135,9 +138,11 @@ namespace {
         PipeManager::OnHandshake(pipe);
     }
 
-    // 抓游戏首次使用 SteamNetworkingSockets 的时机，据此决定 GetAppID 是否切到 480。
-    // 联机会话证书按 480 签发，早于 P2P 切换会让游戏拿不到自己的真实配置；
-    // 配了 -realappid 时这里只做记录，不改变上报值。
+    // Catch the first time the game uses SteamNetworkingSockets; this decides
+    // whether GetAppID flips to 480. The multiplayer session certificate is issued
+    // for 480, and switching before P2P would keep the game from loading its real
+    // config. With -realappid this only records the fact and leaves the reported
+    // value alone.
     static void DetectNetworkingSockets(CUtlBuffer* pRead)
     {
         if (!Hooks_Misc::IsOnlineFixActive() || Hooks_Misc::ShouldReportOnlineFixAppId()) return;
@@ -198,9 +203,11 @@ namespace Hooks_IPC {
     }
 
     void Uninstall() {
-        // 回退场景会重装 hook：不清掉 handler 会越积越多（已实测 6→12），
-        // 虽然 dispatch 只取首个匹配无功能影响，但属于泄漏，必须清。
-        // hash 跟着一起清，否则重装前遗留的值会指向不存在的表项。
+        // The fallback scenario reinstalls the hooks: without clearing the handlers
+        // they accumulate (observed 6→12). Dispatch only takes the first match,
+        // so behavior is unaffected, but it is a leak and must be cleaned up.
+        // Clear the hashes too, otherwise stale values point at entries that no
+        // longer exist.
         g_Handlers.clear();
         g_onlineFixAppIdHash = 0;
         g_legacyTicketHash = 0;
@@ -218,12 +225,14 @@ namespace Hooks_IPC {
                 continue;
             }
             auto& handler = g_Handlers.emplace_back(e,*m);
-            // 记下 GetAppID 的 hash，供 ResolveDispatch 给 onlinefix 精确开口子。
+            // Record the GetAppID hash so ResolveDispatch can let onlinefix
+            // through precisely.
             if (handler.interfaceID == EIPCInterface::IClientUtils &&
                 strcmp(e.methodName, "GetAppID") == 0) {
                 g_onlineFixAppIdHash = handler.funcHash;
             }
-            // 记下票据方法的位置和旧版 hash。外壳按老值调用，需要单独兜一层。
+            // Record the ticket method's position and its legacy hash. The packer
+            // calls with the old value, so a separate fallback is needed.
             if (handler.interfaceID == EIPCInterface::IClientUser &&
                 strcmp(e.methodName, "GetAppOwnershipTicketExtendedData") == 0) {
                 g_legacyTicketHash = 0xC7E71244;

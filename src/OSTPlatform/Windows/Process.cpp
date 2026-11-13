@@ -367,8 +367,9 @@ std::optional<std::string> GetEnvironmentVariableValue(uint32_t pid, std::wstrin
 }
 
 std::optional<std::string> GetProcessCommandLine(uint32_t pid) {
-    // 读目标进程 PEB 里的完整命令行（含启动参数），给需要按命令行识别
-    // 启动方式的调用方用。读不到就当没拿到，不拦不报错。
+    // Reads the full command line (with launch arguments) from the target process's PEB, for
+    // callers that need to identify the launch method from the command line. When it cannot be
+    // read we treat it as unavailable, without blocking or reporting an error.
     Windows::UniqueHandle process =
         OpenProcessHandle(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ);
     if (!process) return std::nullopt;

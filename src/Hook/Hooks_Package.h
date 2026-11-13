@@ -11,13 +11,16 @@ namespace Hooks_Package {
     // Mark package 0 as changed and trigger CClientAppManager_ProcessPendingLicenseUpdates.
     void NotifyLicenseChanged();
 
-    // 回退场景自举：Steam 在 hook 生效前已查完 ownership，之后不再主动重查。
-    // 下一次 CheckAppOwnership 调用时用已就位的 CUser 强制刷一次 license，
-    // 只生效一次，避免循环。正常路径（自然查询不断）不受影响。
+    // Fallback-scenario bootstrap: Steam has already finished checking ownership
+    // before the hook takes effect and will not re-query on its own afterwards.
+    // On the next CheckAppOwnership call, use the now-available CUser to force one
+    // license refresh. Fires only once to avoid loops. The normal path (with a
+    // steady stream of natural queries) is unaffected.
     void RequestRequeryOnce();
 
-    // 查某个 AppId 记下的出借方 accountid，0 表示不是借来的、没有记录。
-    // 上报游玩状态时要把这个值填回 owner，服务器才认得出这是共享会话。
+    // Look up the lender accountid recorded for an AppId; 0 means it was not
+    // borrowed (no record). When reporting play state this value must be written
+    // back into owner so the server recognizes it as a shared session.
     AccountID_t GetFamilySharedOwner(AppId_t appId);
 
 }

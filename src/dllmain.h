@@ -27,15 +27,16 @@
 inline OSTPlatform::DynamicLibrary::ModuleHandle client_hModule = nullptr;
 inline OSTPlatform::DynamicLibrary::ModuleHandle ui_hModule = nullptr;
 
-// SteamUI 的 LoadModuleWithPath 劫持会等这个屏障，确保 client 侧 hook
-// 装完才放 Steam 自己去拿 steamclient 句柄，否则会拿到半初始化状态。
+// SteamUI's LoadModuleWithPath hijack waits on this barrier so the client-side hooks
+// are installed before Steam goes for the steamclient handle; otherwise it gets a half-initialized state.
 inline std::atomic<bool> g_HooksInstalled{false};
-// Diversion 影子模块是否生效。false = 回退到原版 steamclient（hook 就地打在
-// 原模块上，Denuvo/RE 完整性检查会看到，敏感游戏可能闪退），必须大声告警。
+// Whether the Diversion shadow module is in effect. false = fallback to the original
+// steamclient (hooks applied in place on the original module, visible to Denuvo/RE
+// integrity checks, sensitive games may crash): must be warned about loudly.
 inline std::atomic<bool> g_IsDiversionActive{false};
-// Steam 是否真的换到了 diversion 副本上（LoadModuleWithPath 劫持分发成功）。
-// 15s 超时还没换 = Steam 在用启动时加载的原版，副本上的 hook 全打空，
-// 此时必须回退原版保解锁（1.5.2.1 行为），否则静默全灭。
+// Whether Steam really switched to the diversion copy (LoadModuleWithPath hijack dispatched).
+// Not switched within the 15s timeout = Steam runs the original loaded at startup, every hook
+// on the copy misses, and we must fall back to the original to keep unlock (1.5.2.1); else silent total failure.
 inline std::atomic<bool> g_DiversionAdopted{false};
 
 inline constexpr size_t kRuntimePathCapacity = 260;
@@ -50,9 +51,9 @@ inline char ConfigPath[kRuntimePathCapacity]       = {};
 // The fake AppId used by -onlinefix (SpaceWar).
 constexpr AppId_t kOnlineFixAppId = 480;
 
-// 家庭共享 + lua 的游戏在上报时改成这个 AppId，避免服务器按共享许可记账。
-// 取一个不可能存在的 ID：真实存在的 AppId 会被服务器照常播报出去，
-// 只有查不到的这个才既不占名额、也不出现在好友侧。
+// Family-shared + lua games are reported under this AppId so the server does not bill the
+// shared license. It is an impossible ID: a real AppId would be broadcast as usual, while
+// this unresolvable one neither takes a slot nor shows up on the friends side.
 constexpr AppId_t kFamilySharedMaskAppId = 0x7FFFFFFF;
 
 #endif // DLLMAIN_H

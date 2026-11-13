@@ -20,16 +20,18 @@ namespace {
     void* g_pCUser = nullptr;
     PackageInfo* g_pInjectedPackageInfo = nullptr;
 
-    // 家庭共享的出借方 accountid，按 AppId 记录。
-    // Steam 在 bFamilyShared 置位期间把 AppOwnership::SteamId32 填成出借人，
-    // 我这边把标记清掉之后，只有这个字段还能反查归属。上报游玩状态时要用它
-    // 把 owner 还原成真实出借方，否则服务器会认为是一个没有许可的账号在跑
-    // 共享游戏。
+    // Family Sharing lender accountid, recorded per AppId.
+    // While bFamilyShared is set, Steam fills AppOwnership::SteamId32 with the
+    // lender. Once we clear that flag, this is the only field that still lets us
+    // trace ownership back. It is needed when reporting play state to restore
+    // owner to the real lender, otherwise the server sees an account without a
+    // license running a shared game.
     std::unordered_map<AppId_t, AccountID_t> g_familySharedOwners;
     std::mutex g_familySharedOwnersMutex;
 
-    // 这个 AppId 有没有出借方记录。判定自购时要用：共享游戏的 bFamilyShared
-    // 在首轮就被清掉了，后面再查标记认不出来，只能靠这张表兜。
+    // Whether this AppId has a lender record. Needed when deciding self-purchase:
+    // a shared game's bFamilyShared is cleared on the first pass, so the flag can
+    // no longer identify it later — only this table can.
     bool HasFamilySharedOwner(AppId_t appId) {
         std::lock_guard<std::mutex> lock(g_familySharedOwnersMutex);
         return g_familySharedOwners.find(appId) != g_familySharedOwners.end();
@@ -37,9 +39,11 @@ namespace {
 
     bool  g_licenseInitialized = false;
     bool  g_licenseRefreshPending = false;
-    // 回退自举一次性标志：看门狗线程置位，Steam IPC 线程消费（原子，跨线程）。
+    // One-shot fallback bootstrap flag: set by the watchdog thread, consumed by
+    // the Steam IPC thread (atomic, cross-thread).
     std::atomic<bool> g_forceRequeryOnce{false};
-    // 注入熔断：异常触发即永久停注本会话（游戏顶多不解锁，Steam 活着）。
+    // Injection circuit breaker: once tripped by an exception, injection stays
+    // disabled for this session (the game may simply stay locked, Steam survives).
     std::atomic<bool> g_injectDisabled{false};
     static DWORD g_injectExCode = 0;
     static void* g_injectExAddr = nullptr;
@@ -92,9 +96,12 @@ namespace {
             uint32 oldSize = pPkg->AppIdVec.m_Size;
             uint32 numToAdd = static_cast<uint32>(appIds.size());
             LOG_PACKAGE_INFO("InitFakeLicense(PackageId={}): adding {} apps, oldSize={}", kInjectedPackageId, numToAdd, oldSize);
-            // 容量门：新构建若改了 CUtlVector/PackageInfo 布局，按旧偏移读写就是堆破坏。
-            // 写之前验两遍（grow 前后），离谱直接放弃注入并大声报错，绝不碰内存。
-            // 上限按"正常包几百个"取极宽松值，只拦错乱值，不拦正常波动。
+            // Capacity gate: if a new build changes the CUtlVector/PackageInfo
+            // layout, reading/writing at the old offsets corrupts the heap.
+            // Validate twice (before and after grow); on implausible values give
+            // up on injection and log loudly rather than touch memory. The limit
+            // is very generous ("a few hundred per normal package"), so only
+            // garbled values are rejected, not normal variation.
             constexpr uint32 kMaxSaneAppCount = 100000;
             const uint32 allocBefore = pPkg->AppIdVec.m_Memory.m_nAllocationCount;
             if (oldSize > allocBefore || numToAdd > kMaxSaneAppCount || allocBefore > kMaxSaneAppCount) {
@@ -114,7 +121,8 @@ namespace {
             }
             for (uint32 i = 0; i < numToAdd; i++)
                 pPkg->AppIdVec.m_Memory.m_pMemory[oldSize + i] = appIds[i];
-            // Grow 只扩容量不改长度，回写长度保证注入的 AppId 对按长度遍历的逻辑可见
+            // Grow only extends capacity, not length; write the length back so the
+            // injected AppIds are visible to code that iterates by length.
             pPkg->AppIdVec.m_Size = oldSize + numToAdd;
         }
 
@@ -139,8 +147,10 @@ namespace {
     }
 
 
-    // 注入路径全兜底：布局漂移的新构建上，注入及后续处理任何异常都不能带走 Steam。
-    // 崩一次就记码记地址、永久停注本会话（游戏顶多不解锁，Steam 活着 + 日志可查）。
+    // Catch-all around the injection path: on a new build with layout drift, no
+    // exception from injection or its follow-up work may take Steam down. One
+    // crash records the code and address and permanently disables injection for
+    // this session (the game may stay locked, but Steam survives and the log tells why).
 } // namespace
 
 namespace {
@@ -153,22 +163,29 @@ namespace {
 
         TryInitFakeLicenseOnce();
 
-        // 自举刷新（只一次）：回退场景下这次调用大概率是第一次，
-        // GetPackageInfo capture 还没就绪，注入做了一半。g_pCUser 本次已就位，
-        // 强制刷一次 license，第二波查询到来时 capture 就绪，注入完成。
-        // exchange 原子取反清零，不可能循环。
+        // Bootstrap refresh (once only): in the fallback scenario this call is
+        // most likely the first one, the GetPackageInfo capture is not ready yet
+        // and injection was only half done. g_pCUser is set by now, so force a
+        // license refresh; by the time the second wave of queries arrives the
+        // capture is ready and injection completes. The atomic exchange clears the
+        // flag, so it cannot loop.
         if (!g_licenseInitialized && g_forceRequeryOnce.exchange(false)) {
             LOG_PACKAGE_INFO("CheckAppOwnership: priming license re-query after late hook install");
             MarkLicenseAsChangedAndProcessUpdates();
         }
 
-        // 记下出借方归属。必须排在下面清标记之前：清完就再也认不出来了。
-        // 这张表有两个用途：
-        //   1. 非 lua 的共享游戏，上报时把 owner 还原成出借方，避免倒计时踢线
-        //   2. 判断某个 AppId 是不是家庭库里的共享游戏（lua 游戏也要记，
-        //      上报时据此改写成替代 AppId，避免占用出借方名额）
-        // 只认借用标记：清掉之后 SteamId32 会被 Steam 改写，拿它做判断不可信。
-        // 记录写下后不再改动——漏记会让共享修复整体失效，宁可留着多余的。
+        // Record lender ownership. Must happen before the flags are cleared below:
+        // once cleared it can never be identified again.
+        // This table serves two purposes:
+        //   1. Non-lua shared games: restore owner to the lender when reporting,
+        //      so the countdown cannot kick the session offline
+        //   2. Tell whether an AppId is a shared game from the family library
+        //      (lua games must be recorded too; reporting then rewrites it to the
+        //      replacement AppId so it does not consume a lender slot)
+        // Only the borrow flags are trusted: Steam overwrites SteamId32 once they
+        // are cleared, so it is unreliable for decisions. Records are never
+        // rewritten afterwards — a missed record breaks the whole sharing fix, so
+        // a redundant one is preferable.
         if (pOwn && (pOwn->bFamilyShared || pOwn->bBorrowed) && pOwn->SteamId32 != 0) {
             bool recorded = false;
             {
@@ -185,29 +202,38 @@ namespace {
             }
         }
 
-        // 第二个参数传 true：已经标记为真拥有的 AppId 直接跳过，不再重复判定。
+        // The second argument is true: AppIds already marked as genuinely owned
+        // are skipped without re-evaluating.
         if (pOwn && LuaConfig::HasDepot(appId, true)) {
-            // 真拥有的游戏写进 lua 通常是为了补 DLC，主游戏本身不该改走假入库：
-            // 那样会把 Steam 的许可判定覆盖掉，购买状态、成就、时长都会挂到假许可上。
+            // A genuinely owned game is usually listed in lua to add DLC; the main
+            // game itself must not be routed through the fake license: that would
+            // override Steam's license decision and tie purchase state,
+            // achievements and playtime to the fake license.
             //
-            // 判据要同时满足三条，缺一不可：
-            //   1. result：Steam 认这条许可（假入库的也认，所以单看它不够）
-            //   2. ExistInPackageNums > 1：真实包和假许可包同时覆盖
-            //   3. 没有出借方记录：共享游戏也会因为注入假包让这个值涨到 2，
-            //      而且它的 bFamilyShared 在首轮就被我们清掉了，光看标记认不出来。
-            //      g_familySharedOwners 里的记录在清标记之前就写下了，不会漏。
+            // All three conditions must hold:
+            //   1. result: Steam accepts this license (it also accepts fake ones,
+            //      so this alone is not enough)
+            //   2. ExistInPackageNums > 1: covered by both the real package and the
+            //      fake license package
+            //   3. no lender record: a shared game also reaches 2 because of the
+            //      injected fake package, and its bFamilyShared was cleared by us
+            //      on the first pass, so the flag alone cannot identify it.
+            //      The g_familySharedOwners record is written before the flags are
+            //      cleared, so it is never missed.
             const bool borrowed = pOwn->bFamilyShared || pOwn->bBorrowed;
             const bool knownShared = HasFamilySharedOwner(appId);
             if (result && pOwn->ExistInPackageNums > 1 && !borrowed && !knownShared) {
                 LuaConfig::MarkOwned(appId);
                 pOwn->ReleaseState = EAppReleaseState::Released;
-                LOG_PACKAGE_INFO("FakeLicense: AppId={} 自己拥有，按正版处理", appId);
+                LOG_PACKAGE_INFO("FakeLicense: AppId={} owned by self, treating as genuine", appId);
                 return result;
             }
 
-            // 剩下的走假入库：家庭库里也有的游戏因此不会占用出借方名额。
-            // 借用相关的标记必须一并抹掉，否则 Steam 后续仍会按共享许可
-            // 追踪这条 AppId，占用和到期收回照旧发生。
+            // Everything else goes through the fake license: games that are also in
+            // the family library therefore do not consume a lender slot.
+            // Borrow-related flags must be cleared as well, otherwise Steam keeps
+            // tracking this AppId under the shared license, and slot usage and
+            // expiry reclamation still happen.
             pOwn->PackageId          = kInjectedPackageId;
             pOwn->ReleaseState       = EAppReleaseState::Released;
             pOwn->bOwnsLicense       = true;
@@ -227,9 +253,11 @@ namespace {
 
     HOOK_FUNC(CheckAppOwnership, bool, void* pObj, AppId_t appId, AppOwnership* pOwn) {
         bool result = oCheckAppOwnership(pObj, appId, pOwn);
-        // 熔断后直接返回原结果，不再碰任何内存。
+        // After the circuit breaker trips, return the original result without
+        // touching any memory.
         if (g_injectDisabled.load()) return result;
-        // 本函数只有 POD 局部量、无 C++ 对象，__try 在此合法（/EHsc）。
+        // This function has only POD locals and no C++ objects, so __try is valid
+        // here (/EHsc).
         bool out = result;
         __try {
             out = CheckAppOwnershipBody(pObj, appId, pOwn, result);
@@ -273,7 +301,9 @@ namespace Hooks_Package {
     }
 
     void NotifyLicenseChanged() {
-        // 熔断后热重载也不碰内存：直接返回，pending 队列留给下次（量极小，可忽略）。
+        // Even with a hot reload after the breaker trips, touch no memory: return
+        // immediately and leave the pending queue for next time (tiny volume,
+        // negligible).
         if (g_injectDisabled.load()) {
             LOG_PACKAGE_WARN("NotifyLicenseChanged: injection disabled after crash, skipping");
             return;
@@ -314,7 +344,8 @@ namespace Hooks_Package {
                     addedIds.insert(additions[i]);
                     LOG_PACKAGE_DEBUG("NotifyLicenseChanged: inserted AppId {} at [{}]", additions[i], oldSize + i);
                 }
-                // Grow 只扩容量不改长度，回写长度保证注入的 AppId 对按长度遍历的逻辑可见
+                // Grow only extends capacity, not length; write the length back so
+                // the injected AppIds are visible to code that iterates by length.
                 pPkg->AppIdVec.m_Size = oldSize + static_cast<uint32_t>(additions.size());
             }else {
                 LOG_PACKAGE_WARN("NotifyLicenseChanged: failed to grow AppId vector for additions");

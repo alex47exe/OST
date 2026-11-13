@@ -1,15 +1,16 @@
 // version.dll HiJack Project - loader-stage agent.
 //
-// steam.exe 的静态导入表里有 VERSION.dll，把这个代理放进 Steam 目录后，
-// 它随加载器在进程初始化阶段就进入进程——比 Steam 首次加载 steamclient64.dll
-// 更早。OpenSteamTool 因此能抢在首载之前架好重定向视野（首载抢劫 + 句柄改道）。
-// 本模块运行在 steam.exe 的启动关键路径上：导出必须全量转发、DllMain 绝不能
-// 失败，否则静态导入解析失败会直接让 Steam 起不来。
+// steam.exe's static import table lists VERSION.dll, so once this proxy is placed in the Steam
+// directory it enters the process during loader initialization — earlier than Steam's first
+// load of steamclient64.dll. OpenSteamTool can therefore set up its redirect view ahead of that
+// first load (first-load hijack + handle redirection). This module runs on steam.exe's startup
+// critical path: all exports must be forwarded and DllMain must never fail, otherwise static
+// import resolution fails and Steam simply won't start.
 
 #include <windows.h>
 
 // ─── 1. Real system version.dll binding ──────────────────────────
-// 必须用 System32 全路径绑定真身：按名 LoadLibrary("version.dll") 会命中本模块。
+// Must bind the real module by its full System32 path: LoadLibrary("version.dll") by name hits this module.
 static HMODULE g_hRealVersion = nullptr;
 
 static FARPROC g_pGetFileVersionInfoA = nullptr;
@@ -32,7 +33,8 @@ static FARPROC g_pVerQueryValueW = nullptr;
 
 static void EnsureRealVersion()
 {
-    // magic static：只初始化一次且线程安全，多线程首次并发调用也只加载一次真身。
+    // magic static: initialized exactly once and thread-safe; concurrent first calls from
+    // several threads still load the real module only once.
     static const bool ready = [] {
         char realPath[MAX_PATH + 16] = {};
         if (!GetSystemDirectoryA(realPath, MAX_PATH))
@@ -67,7 +69,7 @@ static void EnsureRealVersion()
     (void)ready;
 }
 
-// ─── 2. Forwarded exports（序数与系统 version.dll 对齐，名字相同）─────
+// ─── 2. Forwarded exports (ordinals match the system version.dll, names identical) ─────
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoA,@1")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoByHandle,@2")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoExA,@3")
@@ -218,12 +220,13 @@ extern "C" BOOL WINAPI VerQueryValueW(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID
 }
 
 // ─── 3. OpenSteamTool injection ───────────────────────────────────
-// 只在宿主是 steam.exe 时注入（不区分大小写）；其它进程放行不注入。
+// Inject only when the host process is steam.exe (case-insensitive); other processes pass through.
 static void OpenSteamToolLoad(HMODULE selfModule)
 {
     char exePath[MAX_PATH] = {};
     const DWORD exeLen = GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    // 拿不到宿主名或路径被截断（文件名不可信）就放弃注入：宁可漏注也不错杀。
+    // If the host name is unavailable or the path was truncated (unreliable filename), skip
+    // injection: better to miss an injection than to kill the wrong process.
     if (exeLen == 0 || exeLen >= MAX_PATH)
         return;
     const char* exeName = strrchr(exePath, '\\');
@@ -231,8 +234,8 @@ static void OpenSteamToolLoad(HMODULE selfModule)
     if (_stricmp(exeName, "steam.exe") != 0)
         return;
 
-    // 按自身所在目录定位本体：不依赖 DLL 搜索顺序，也隔绝同目录之外的
-    // 同名文件劫持（CWD/PATH 里塞假体）。代理放哪，本体就在哪。
+    // Locate the payload via this module's own directory: no reliance on DLL search order, and
+    // same-named files planted elsewhere (CWD/PATH) can't hijack it. Payload follows the proxy.
     char selfPath[MAX_PATH + 16] = {};
     const DWORD selfLen = GetModuleFileNameA(selfModule, selfPath, MAX_PATH);
     if (selfLen == 0 || selfLen >= MAX_PATH)
@@ -250,8 +253,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)
     {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
-        // 本模块是 steam.exe 的静态导入：这里返回 FALSE 会让进程初始化直接失败。
-        // OpenSteamTool 载不进来（被杀软拦截、副本损坏）也只是放弃注入，放行 Steam。
+        // This module is a static import of steam.exe: returning FALSE here fails process init outright.
+        // If OpenSteamTool can't load (blocked by AV, corrupted copy) we only skip injection and let Steam run.
         OpenSteamToolLoad(hModule);
         break;
     case DLL_THREAD_ATTACH:

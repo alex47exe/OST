@@ -66,10 +66,12 @@ namespace {
     constexpr size_t kLegacyScanChunkBytes = 8ull * 1024ull * 1024ull;
     constexpr size_t kOepScanChunkBytes = 8ull * 1024ull * 1024ull;
 
-    // 结构兜底的尺寸门槛：太小的 RWX 段是正常的 JIT / 跳板代码，不参与判定。
+    // Structural fallback size floor: tiny RWX sections are normal JIT / trampoline code
+    // and do not participate in detection.
     constexpr uint32 kProtectorBlobMinBytes = 4u * 1024u * 1024u;
-    // 熵达到这个值本身就足以判定，不需要段名佐证：保护壳在盘上是加密态，
-    // 实测 .text 6.64、.ecode 6.63、.didata 6.72 都远高于普通代码段。
+    // Reaching this entropy value is enough to classify on its own without section-name
+    // corroboration: protectors are encrypted on disk, and measured .text 6.64, .ecode 6.63
+    // and .didata 6.72 are all far above ordinary code sections.
     constexpr double kProtectorBlobEncryptedEntropy = 6.0;
     constexpr size_t kProtectorBlobEntropySampleBytes = 8ull * 1024ull * 1024ull;
 
@@ -250,17 +252,24 @@ namespace {
         return match;
     }
 
-    // 结构兜底：抓既没有 OEP 特征、段内也没有 DENUVO 字样的构建。
+    // Structural fallback: catches builds that carry neither the OEP signature nor a DENUVO
+    // string inside the section.
     //
-    // 前提是存在足够大的可写且可执行段——运行时就地解密的必然产物，段头标志位
-    // 在盘上和解密前就能读到。段名不能当必要条件：保护壳每次改版都会换名字，
-    // 同一个游戏不同构建可能从保护区段名换成常规代码段名，只认段名就会漏判。
+    // The premise is a large enough writable+executable (RWX) section — the unavoidable product
+    // of in-place runtime decryption; the section header flags are readable on disk before any
+    // decryption. The section name cannot be a requirement: the protector renames things on
+    // every revision, and different builds of the same game may switch from a protector section
+    // name to an ordinary code section name, so relying on names alone yields false negatives.
     //
-    // 因此段名降级为补充证据，两条任一成立即判定：
-    //   熵   盘上是加密态，最直接，但受样本分布影响，稀疏的构建会偏低；
-    //   段名 保护壳改名留下的痕迹，随版本变化，专给熵偏低时兜底。
-    // 两条都不成立才排除。判定偏向多认：漏判会让整条授权链路失效，而误判还会
-    // 被 GetSpoofSteamID 的名单门控和取票失败的返回值挡住，代价小得多。
+    // The section name is therefore demoted to supporting evidence; either of the two being
+    // true classifies:
+    //   entropy  encrypted on disk, most direct, but sample-dependent and low for sparse builds;
+    //   section  traces left by the protector's renames, version-dependent, the fallback when
+    //            entropy is low.
+    // Only when both fail is the module excluded. Detection leans towards recognizing: a false
+    // negative breaks the whole authorization chain, while a false positive is still blocked by
+    // the allowlist gate in GetSpoofSteamID and by the ticket-fetch failure return, costing far
+    // less.
     std::optional<DetectionMatch> TryProtectedBlobSection(
         const ModuleCandidate& module,
         const OSTPlatform::PE::Image& image) {
@@ -313,7 +322,7 @@ namespace {
             }
         }
 
-        // 前两条都没命中时的最后一道：段结构特征。
+        // Last resort when neither of the first two matched: section structure characteristics.
         if (const auto match = TryProtectedBlobSection(module, image)) {
             return match;
         }

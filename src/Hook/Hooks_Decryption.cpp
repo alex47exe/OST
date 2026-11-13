@@ -19,9 +19,11 @@ namespace {
         LOG_DECRYPTIONKEY_DEBUG("ConfigStore::GetBinary called for pObject={}, eConfigStore={}, KeyName='{}'", 
                                     pObject, static_cast<uint32>(eConfigStore), name);
 
-        // 票据读取。带壳的游戏启动时会在这里取所有权票据，拿不到就过不了壳的校验。
-        // 假入库的游戏本地没有票，用一张真实票据改出目标 appid 补上，
-        // 签名段保持原样，壳按老版本的解析方式能对得上。
+        // Ticket read. Packed games fetch the ownership ticket here at startup and
+        // fail the packer's validation without one. A fake-license game has no
+        // local ticket, so a genuine ticket is patched to the target appid and
+        // supplied instead; the signature section is left untouched so the packer's
+        // legacy parsing still matches.
         if (name.rfind("apptickets\\", 0) == 0) {
             int32 got = oConfigStoreGetBinary(pObject, eConfigStore, KeyName, Key, KeySize);
             AppId_t ticketAppId = 0;
@@ -39,8 +41,10 @@ namespace {
                         AppTicket::AppTicketSource::ForgeOnly)
                     && !forged.data.empty()
                     && forged.data.size() <= KeySize) {
-                    // 顺带把主数据区里的 appid 也改成目标值。插入法只在签名前
-                    // 多塞了一份，按常规偏移读到的还是 donor 的值，两边对不上。
+                    // Also rewrite the appid in the main data area. The insertion
+                    // approach only adds an extra copy before the signature, so a
+                    // read at the usual offset still returns the donor's value and
+                    // the two disagree.
                     if (forged.data.size() > AppTicket::kAppTicketAppIdOffset + sizeof(AppId_t)) {
                         memcpy(forged.data.data() + AppTicket::kAppTicketAppIdOffset,
                                &ticketAppId, sizeof(AppId_t));
