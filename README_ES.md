@@ -107,7 +107,7 @@ La compilación de `version.dll` se publica a propósito con el sufijo `.disable
 | `ost-manager.exe` | CLI, menú de consola (`--tui`) y gestor con ventana (doble clic o `--ui`) |
 | `ost-loader.exe` | Ayudante sin ventana que Windows ejecuta en lugar de `steam.exe` a través de IFEO |
 
-La ventana ofrece un selector de punto de entrada con una explicación por método, estado con colores (verde = correcto, ámbar = atención, rojo = dos puntos de entrada), un icono y un tooltip en cada acción, un registro de acciones con colores (verde información, ámbar aviso, rojo error) y un conmutador de tema Claro/Oscuro/Sistema guardado por usuario (`HKCU\Software\OpenSteamTool\GuiTheme`).
+La ventana ofrece un selector de punto de entrada con una explicación por método, estado con colores (verde = correcto, ámbar = atención, rojo = dos puntos de entrada), un icono y un tooltip en cada acción, un registro de acciones con colores (verde información, ámbar aviso, rojo error) y un conmutador de tema Claro/Oscuro/Sistema guardado por usuario (`HKCU\Software\OpenSteamTool\GuiTheme`). En Windows 11 usa el marco nativo: esquinas redondeadas, color de borde de DWM, barra de título oscura, Segoe UI Variable y el color de acento de Configuración para hover/pulsado/foco; en Windows 10 recurre a una paleta simple.
 
 **Siempre hay exactamente un punto de entrada activo.** Cada instalación elimina la clave IFEO, los demás proxies y sus copias del payload antes de desplegar el suyo, y `status` informa cuántos puntos de entrada están activos (y avisa si hay más de uno). Los restos de una instalación anterior se reconocen aunque se haya perdido su registro, así que un proxy antiguo nunca puede seguir cargando un payload viejo junto a uno nuevo.
 

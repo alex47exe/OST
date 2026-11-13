@@ -98,7 +98,7 @@ Theme MakeLightTheme() {
     t.dark = false;
     t.window = RGB(0xF3, 0xF3, 0xF3);
     t.card = RGB(0xFF, 0xFF, 0xFF);
-    t.border = RGB(0xDD, 0xDD, 0xDD);
+    t.border = RGB(0xE5, 0xE5, 0xE5);
     t.text = RGB(0x1A, 0x1A, 0x1A);
     t.subtle = RGB(0x5C, 0x5C, 0x5C);
     t.accent = RGB(0x0F, 0x6C, 0xBD);
@@ -139,7 +139,7 @@ Theme MakeDarkTheme() {
     return t;
 }
 
-enum class Glyph { None, Install, Uninstall, Inject, Play, Stop, Power, Restart, Folder, Contrast };
+enum class Glyph { None, Install, Uninstall, Inject, Play, Stop, Power, Restart, Folder, Contrast, Chevron };
 
 struct Card {
     RECT rect{};
@@ -270,14 +270,71 @@ int SystemDpi() {
     return dpi != 0 ? dpi : 96;
 }
 
+COLORREF Blend(COLORREF base, COLORREF tint, int percent) {
+    const int red = GetRValue(base) + (GetRValue(tint) - GetRValue(base)) * percent / 100;
+    const int green = GetGValue(base) + (GetGValue(tint) - GetGValue(base)) * percent / 100;
+    const int blue = GetBValue(base) + (GetBValue(tint) - GetBValue(base)) * percent / 100;
+    return RGB(red, green, blue);
+}
+
+// Windows 11 "accent" colour from Settings > Personalisation > Colours; the
+// stored value is 0xAABBGGRR like the rest of the shell.
+COLORREF SystemAccent() {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+                     L"AccentColorMenu", RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS) {
+        return RGB(0x0F, 0x6C, 0xBD);
+    }
+    const COLORREF color = RGB(value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF);
+    return color == RGB(0, 0, 0) ? RGB(0x0F, 0x6C, 0xBD) : color;
+}
+
+// Windows 11 ships Segoe UI Variable; Windows 10 does not, and substitutes a
+// noticeably different font, so ask before using it.
+bool FontFamilyExists(const wchar_t* name) {
+    HDC dc = GetDC(nullptr);
+    if (!dc) return false;
+    LOGFONTW request{};
+    request.lfCharSet = DEFAULT_CHARSET;
+    lstrcpynW(request.lfFaceName, name, LF_FACESIZE);
+    bool found = false;
+    EnumFontFamiliesExW(dc, &request,
+                        [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM param) -> int {
+                            *reinterpret_cast<bool*>(param) = true;
+                            return 0;
+                        },
+                        reinterpret_cast<LPARAM>(&found), 0);
+    ReleaseDC(nullptr, dc);
+    return found;
+}
+
+const wchar_t* UiFontName() {
+    static const wchar_t* name =
+        FontFamilyExists(L"Segoe UI Variable Text") ? L"Segoe UI Variable Text" : L"Segoe UI";
+    return name;
+}
+
 int Dpi() { return g.dpi; }
 
 int Px(int value) { return MulDiv(value, Dpi(), 96); }
 
+// True when the control sits on a card (which is painted with theme.card) and
+// not on the window surface (theme.window / Mica).
+bool IsCardChild(HWND child) {
+    if (!child) return false;
+    POINT origin{0, 0};
+    MapWindowPoints(child, g.window, &origin, 1);
+    for (const auto& card : g.cards) {
+        if (PtInRect(&card.rect, origin)) return true;
+    }
+    return false;
+}
+
 HFONT CreateUiFont(int points, bool bold) {
     return CreateFontW(-MulDiv(points, Dpi(), 72), 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE,
                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                       DEFAULT_PITCH | FF_DONTCARE, UiFontName());
 }
 
 void SetText(HWND control, const std::wstring& text) {
@@ -297,12 +354,27 @@ bool SystemUsesDarkTheme() {
 }
 
 Theme ResolveTheme() {
+    Theme theme;
     switch (g.themeMode) {
-        case ThemeMode::Light: return MakeLightTheme();
-        case ThemeMode::Dark: return MakeDarkTheme();
+        case ThemeMode::Light: theme = MakeLightTheme(); break;
+        case ThemeMode::Dark: theme = MakeDarkTheme(); break;
         case ThemeMode::System:
-        default: return SystemUsesDarkTheme() ? MakeDarkTheme() : MakeLightTheme();
+        default: theme = SystemUsesDarkTheme() ? MakeDarkTheme() : MakeLightTheme(); break;
     }
+
+    // Follow the Windows accent colour, and derive the interaction states from
+    // it the way WinUI does: a light tint on hover, a stronger one when pressed.
+    const COLORREF accent = SystemAccent();
+    if (theme.dark) {
+        theme.accent = Blend(accent, RGB(0xFF, 0xFF, 0xFF), 35);
+        theme.buttonHover = Blend(theme.button, theme.accent, 16);
+        theme.buttonPressed = Blend(theme.button, theme.accent, 28);
+    } else {
+        theme.accent = Blend(accent, RGB(0, 0, 0), 6);
+        theme.buttonHover = Blend(theme.button, theme.accent, 8);
+        theme.buttonPressed = Blend(theme.button, theme.accent, 18);
+    }
+    return theme;
 }
 
 void LoadThemePreference() {
@@ -321,15 +393,46 @@ void SaveThemePreference() {
 
 void ApplyTitleBar(HWND window, bool dark) {
     using SetAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+
     // Load the system copy on purpose: this bundle also contains our dwmapi
     // proxy, which must never be pulled into the manager.
-    HMODULE dwm = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!dwm) return;
-    auto setAttribute = reinterpret_cast<SetAttributeFn>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
+    static HMODULE dwm = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static auto setAttribute =
+        dwm ? reinterpret_cast<SetAttributeFn>(GetProcAddress(dwm, "DwmSetWindowAttribute")) : nullptr;
     if (!setAttribute) return;
+
     BOOL value = dark ? TRUE : FALSE;
     setAttribute(window, 20, &value, sizeof(value)); // DWMWA_USE_IMMERSIVE_DARK_MODE
     setAttribute(window, 19, &value, sizeof(value)); // pre-20H1 builds
+
+    // Windows 11 chrome: rounded corners, a hairline border that matches the
+    // theme, and Mica behind the client area when transparency is enabled.
+    static const bool windows11 = [] {
+        OSVERSIONINFOW info{};
+        info.dwOSVersionInfoSize = sizeof(info);
+        if (HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+            using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+            auto getVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+            if (getVersion && getVersion(&info) == 0) return info.dwBuildNumber >= 22000;
+        }
+        return false;
+    }();
+
+    if (!windows11) {
+        SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        return;
+    }
+
+    DWORD corners = 2; // DWMWCP_ROUND
+    setAttribute(window, 33, &corners, sizeof(corners)); // DWMWA_WINDOW_CORNER_PREFERENCE
+
+    const COLORREF borderColor = dark ? RGB(0x3A, 0x3A, 0x3A) : RGB(0xD6, 0xD6, 0xD6);
+    setAttribute(window, 34, &borderColor, sizeof(borderColor)); // DWMWA_BORDER_COLOR
+
+    // Windows 11 chrome: rounded corners and a hairline border that follows the
+    // theme. The system backdrop (Mica) is deliberately not enabled: the window
+    // is GDI-painted, and ClearType text or near-black fills over a composited
+    // backdrop render muddy, so the palette paints a solid surface instead.
     SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 }
 
@@ -370,6 +473,7 @@ void ApplyTheme(HWND window, bool recreateBrushes) {
         SendMessageW(g.logView, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
     }
     if (g.tooltip) {
+        SetWindowTheme(g.tooltip, scrollTheme, nullptr);
         SendMessageW(g.tooltip, TTM_SETTIPBKCOLOR, 0, static_cast<LPARAM>(g.theme.card));
         SendMessageW(g.tooltip, TTM_SETTIPTEXTCOLOR, 0, static_cast<LPARAM>(g.theme.text));
     }
@@ -488,7 +592,7 @@ void FillRounded(HDC dc, const RECT& rect, COLORREF fill, COLORREF border) {
     HPEN pen = CreatePen(PS_SOLID, 1, border);
     HGDIOBJ oldBrush = SelectObject(dc, brush);
     HGDIOBJ oldPen = SelectObject(dc, pen);
-    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, Px(6), Px(6));
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, Px(8), Px(8));
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldPen);
     DeleteObject(brush);
@@ -607,6 +711,13 @@ void DrawGlyph(HDC dc, const RECT& box, Glyph glyph, COLORREF color) {
             Pie(dc, cx - radius, cy - radius, cx + radius, cy + radius, cx, top, cx, top + height);
             break;
         }
+        case Glyph::Chevron: {
+            const int middle = cy + height / 10;
+            MoveToEx(dc, left + width / 5, middle - height / 6, nullptr);
+            LineTo(dc, cx, middle + height / 8);
+            LineTo(dc, left + width - width / 5, middle - height / 6);
+            break;
+        }
         case Glyph::None:
         default:
             break;
@@ -644,6 +755,12 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
     if (disabled) fill = theme.dark ? theme.card : RGB(0xF0, 0xF0, 0xF0);
     else if (pressed) fill = theme.buttonPressed;
     else if (hover) fill = theme.buttonHover;
+
+    // Wipe the surface behind the rounded shape first: otherwise the corners
+    // keep the classic control colour (light in the dark theme).
+    HBRUSH surface = CreateSolidBrush(IsCardChild(item.hwndItem) ? theme.card : theme.window);
+    FillRect(item.hDC, &item.rcItem, surface);
+    DeleteObject(surface);
 
     HBRUSH brush = CreateSolidBrush(fill);
     HPEN pen = CreatePen(PS_SOLID, 1, theme.buttonBorder);
@@ -687,10 +804,85 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
 
     if (focused) {
         RECT focus = item.rcItem;
-        InflateRect(&focus, -Px(3), -Px(3));
-        DrawFocusRect(item.hDC, &focus);
+        InflateRect(&focus, -Px(2), -Px(2));
+        HBRUSH nullBrush = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
+        HPEN focusPen = CreatePen(PS_SOLID, (std::max)(1, MulDiv(1, Dpi(), 96)), theme.accent);
+        HGDIOBJ oldFocusBrush = SelectObject(item.hDC, nullBrush);
+        HGDIOBJ oldFocusPen = SelectObject(item.hDC, focusPen);
+        RoundRect(item.hDC, focus.left, focus.top, focus.right, focus.bottom, radius * 2, radius * 2);
+        SelectObject(item.hDC, oldFocusBrush);
+        SelectObject(item.hDC, oldFocusPen);
+        DeleteObject(focusPen);
     }
     SelectObject(item.hDC, oldFont);
+}
+
+// Combo boxes are painted here instead of by the system: the themed frame and
+// arrow would otherwise stay light in the dark theme and square next to the
+// rounded buttons. The drop-down list itself is still the system popup, with
+// its items drawn through WM_DRAWITEM.
+void DrawComboFrame(HWND combo, HDC dc, const RECT& client) {
+    const Theme& theme = g.theme;
+    const bool disabled = !IsWindowEnabled(combo);
+
+    // Surface behind the rounded field, then the field itself.
+    HBRUSH surface = CreateSolidBrush(IsCardChild(combo) ? theme.card : theme.window);
+    FillRect(dc, &client, surface);
+    DeleteObject(surface);
+
+    RECT field = client;
+    HBRUSH background = CreateSolidBrush(theme.edit);
+    HPEN border = CreatePen(PS_SOLID, 1, theme.buttonBorder);
+    HGDIOBJ oldBrush = SelectObject(dc, background);
+    HGDIOBJ oldPen = SelectObject(dc, border);
+    RoundRect(dc, field.left, field.top, field.right, field.bottom, Px(8), Px(8));
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(background);
+    DeleteObject(border);
+
+    const int selected = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+    if (selected >= 0) {
+        wchar_t buffer[256] = {};
+        SendMessageW(combo, CB_GETLBTEXT, static_cast<WPARAM>(selected), reinterpret_cast<LPARAM>(buffer));
+        HGDIOBJ oldFont = SelectObject(dc, g.font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, disabled ? theme.subtle : theme.text);
+        RECT text = client;
+        text.left += Px(10);
+        text.right -= Px(30);
+        DrawTextW(dc, buffer, -1, &text,
+                  DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SelectObject(dc, oldFont);
+    }
+
+    RECT arrow{client.right - Px(26), client.top + Px(2), client.right - Px(8), client.bottom - Px(2)};
+    DrawGlyph(dc, arrow, Glyph::Chevron, disabled ? theme.subtle : theme.subtle);
+}
+
+LRESULT CALLBACK ComboSubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR,
+                               DWORD_PTR) {
+    switch (message) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(window, &ps);
+            RECT client{};
+            GetClientRect(window, &client);
+            DrawComboFrame(window, dc, client);
+            EndPaint(window, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_ENABLE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            InvalidateRect(window, nullptr, TRUE);
+            break;
+        default:
+            break;
+    }
+    return DefSubclassProc(window, message, wParam, lParam);
 }
 
 void DrawComboItem(const DRAWITEMSTRUCT& item) {
@@ -1215,15 +1407,7 @@ LRESULT CALLBACK ButtonSubclass(HWND window, UINT message, WPARAM wParam, LPARAM
     return DefSubclassProc(window, message, wParam, lParam);
 }
 
-bool IsCardChild(HWND child) {
-    if (!child) return false;
-    POINT origin{0, 0};
-    MapWindowPoints(child, g.window, &origin, 1);
-    for (const auto& card : g.cards) {
-        if (PtInRect(&card.rect, origin)) return true;
-    }
-    return false;
-}
+bool IsCardChild(HWND child);
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -1252,8 +1436,14 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             ApplyStrings();
             for (HWND button : {g.btnInstall, g.btnUninstall, g.btnInject, g.btnWatch, g.btnAutostart,
                                 g.btnRestart, g.btnOpenLog, g.themeButton}) {
-                if (button) SetWindowSubclass(button, ButtonSubclass, 1, 0);
+                if (!button) continue;
+                // Visual styles would draw a square themed frame around the
+                // rounded owner-drawn button.
+                SetWindowTheme(button, L"", L"");
+                SetWindowSubclass(button, ButtonSubclass, 1, 0);
             }
+            if (g.languageCombo) SetWindowSubclass(g.languageCombo, ComboSubclass, 1, 0);
+            if (g.methodCombo) SetWindowSubclass(g.methodCombo, ComboSubclass, 1, 0);
             DrainLogFile();
             SetTimer(window, kTimerRefresh, 700, nullptr);
             if (!GetEnvVar(L"OST_GUI_SELFTEST").empty()) SetTimer(window, kTimerSelftest, 2500, nullptr);
@@ -1264,8 +1454,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             HDC dc = BeginPaint(window, &ps);
             RECT client{};
             GetClientRect(window, &client);
-            FillRect(dc, &client, g.windowBrush);
-            PaintCards(dc);
+            // With Mica the compositor paints the background; filling it here
+            // would hide the material.
+            FillRect(dc, &client, g.windowBrush);            PaintCards(dc);
             EndPaint(window, &ps);
             return 0;
         }
@@ -1298,7 +1489,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
             if (id == IdMethodHint || id == IdFooter) color = g.theme.subtle;
             SetTextColor(dc, color);
-            return reinterpret_cast<LRESULT>(IsCardChild(child) ? g.cardBrush : g.windowBrush);
+            HBRUSH background = IsCardChild(child) ? g.cardBrush : g.windowBrush;
+            return reinterpret_cast<LRESULT>(background);
         }
 
         case WM_CTLCOLORLISTBOX: {
