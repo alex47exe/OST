@@ -107,7 +107,11 @@ The shipped `version.dll` build has a `.disabled` suffix on purpose: `steam.exe`
 | `ost-manager.exe` | CLI, console menu (`--tui`) and windowed manager (double-click or `--ui`) |
 | `ost-loader.exe` | Windowless helper that Windows runs instead of `steam.exe` through IFEO |
 
+<<<<<<< HEAD
 The window shows one entry-point picker with a one-line explanation per method, colour-coded status (green = healthy, amber = attention, red = two entry points), an icon on every action with a tooltip, a colour-coded action log (green info, amber warning, red error) and a Light/Dark/System theme switch stored per user (`HKCU\Software\OpenSteamTool\GuiTheme`). On Windows 11 the window uses the native chrome — rounded corners, the DWM border colour, a dark title bar, Segoe UI Variable and the accent colour from Settings for hover/pressed/focus — and falls back to a plain palette on Windows 10.
+=======
+The window shows one entry-point picker with a one-line explanation per method, colour-coded status (green = healthy, amber = attention, red = two entry points), an icon on every action with a tooltip, a colour-coded action log (green info, amber warning, red error) and a Light/Dark/System theme switch stored per user (`HKCU\Software\OpenSteamTool\GuiTheme`). On Windows 11 the window uses the native chrome — Mica backdrop, rounded corners, DWM border colour, Segoe UI Variable and the accent colour from Settings for hover/pressed/focus — and falls back to the solid palette on Windows 10.
+>>>>>>> 2168183b1e1dc6d50148402e0fa6a951bf262ddb
 
 **Exactly one entry point is active at a time.** Every install removes the IFEO key, the other proxy DLLs and their payload copies before deploying its own, and `status` reports how many entry points are live (and warns when more than one is). Leftovers from an earlier install are recognised even when their bookkeeping is gone, so a stale proxy can never keep loading an old payload next to a fresh one.
 
