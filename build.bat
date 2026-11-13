@@ -40,6 +40,13 @@ for %%C in (%CONFIGS%) do (
     echo [INFO] Building tool extract_tickets for %%C
     cmake --build build --config %%C --target extract_tickets
     if errorlevel 1 goto :fail
+
+    REM ost is split in two executables: ost-manager (CLI + window) and
+    REM ost-loader (windowless IFEO helper). Both land in build\tools\%%C\
+    REM together with OpenSteamTool.dll and the proxy DLLs.
+    echo [INFO] Building tools ost-manager and ost-loader for %%C
+    cmake --build build --config %%C --target ost-manager ost-loader
+    if errorlevel 1 goto :fail
 )
 
 echo [OK] Build completed successfully.

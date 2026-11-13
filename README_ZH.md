@@ -88,7 +88,7 @@
 
 ### 选择加载器
 
-把 `OpenSteamTool.dll` 和**一个或多个**加载器 DLL 复制到 Steam 根目录。同时放多个加载器不会出问题——重复的 `LoadLibrary` 只会增加模块引用计数。
+把 `OpenSteamTool.dll` 和 **一个** 加载器 DLL 复制到 Steam 根目录。只使用一个入口：两个入口会从不同目录把两份 `OpenSteamTool.dll` 载入同一个 Steam 进程，所有 hook 被安装两次，导致 Steam 崩溃。`ost-manager.exe` 会为你保证这一点（见 [管理器与 IFEO 加载器](#管理器与-ifeo-加载器)）。
 
 | 加载器 | Steam 如何加载它 | 取舍 |
 |---|---|---|
@@ -97,6 +97,29 @@
 | `xinput1_4.dll` | 完整的 XInput 包装（含未文档化的序数），Steam 初始化手柄支持时加载 | 转发与注入规则同 `dwmapi.dll`，可作为额外的可选入口 |
 
 发布的 `version.dll` 构建故意带 `.disabled` 后缀：`steam.exe` 找不到它，会回退到系统 DLL。只有需要早注隔离时才改名为 `version.dll`，并且不要与使用 EAC/BE 的游戏同时启用。
+
+### 管理器与 IFEO 加载器
+
+`build\tools\<Config>\` 里是一套完整的文件——`ost-manager.exe`、`ost-loader.exe`、`OpenSteamTool.dll` 和三个代理——无需手工复制任何东西。
+
+| 文件 | 作用 |
+|---|---|
+| `ost-manager.exe` | 命令行、控制台菜单（`--tui`）和窗口管理器（双击或 `--ui`） |
+| `ost-loader.exe` | 无窗口的辅助程序，Windows 通过 IFEO 用它代替 `steam.exe` 启动 |
+
+**任何时刻只有一个入口处于激活状态。** 每次安装都会先删除 IFEO 键、其他代理 DLL 及其载荷副本，然后再部署自己；`status` 会显示当前激活的入口数量（多于一个时给出警告）。即使记录已丢失，旧安装残留也能被识别，因此过期的代理绝不会和新载荷同时加载。
+
+```bat
+ost-manager.exe status
+ost-manager.exe install dwmapi        :: bin\dwmapi.dll 代理（默认）
+ost-manager.exe install version       :: version.dll 代理（早注隔离）
+ost-manager.exe install xinput        :: xinput1_4.dll 代理
+ost-manager.exe install ifeo          :: IFEO 加载器，不向 Steam 内复制任何文件
+ost-manager.exe install ifeo-root     :: IFEO 加载器，并把 ost-loader.exe 部署到 Steam 根目录
+ost-manager.exe uninstall
+```
+
+选项：`--steam-dir <路径>`、`--payload <路径>`、`--restart`（安装前后重启 Steam，`--force` 强制结束卡住的 Steam，`--no-start` 只关闭不启动）、`--dry-run`、`--json`、`--ui`、`--tui`、`--log <路径>`。原版 `ost-manager` 的开关继续可用：`/install-portable <dll>`、`/install-root <dir> <dll>`、`/deploy-dll <dir> [dll]`、`/remove-dll <dir>`、`/inject`、`/watch`、`/uninstall`、`/status`、`/enable-autostart`、`/disable-autostart`、`/silent`。
 
 ### 步骤
 
@@ -118,7 +141,7 @@
 
 ### 卸载
 
-关闭 Steam，删除加载器 DLL 与 `OpenSteamTool.dll`，再删除 `<Steam>\bin\diversion64.dll` 和 `<Steam>\opensteamtool\` 目录。
+关闭 Steam 后运行 `ost-manager.exe uninstall`（会清除 IFEO 项、代理 DLL、载荷副本、开机启动项和运行期产物）。手工方式：关闭 Steam，删除加载器 DLL 与 `OpenSteamTool.dll`，再删除 `<Steam>\bin\diversion64.dll` 和 `<Steam>\opensteamtool\` 目录。
 
 ## 快速开始
 

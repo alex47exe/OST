@@ -88,7 +88,7 @@ Solo se admite la compilación para Windows.
 
 ### Elige un cargador
 
-Copia `OpenSteamTool.dll` y **uno o varios** cargadores al directorio raíz de Steam. Cargar varios cargadores no causa problemas: una `LoadLibrary` repetida solo incrementa el contador de referencias del módulo.
+Copia `OpenSteamTool.dll` y **un solo** cargador al directorio raíz de Steam. Usa exactamente un punto de entrada: dos de ellos cargan dos copias de `OpenSteamTool.dll` desde carpetas distintas en el mismo proceso de Steam e instalan cada hook dos veces, lo que cierra Steam. `ost-manager.exe` lo garantiza por ti (ver [Gestor y cargador IFEO](#gestor-y-cargador-ifeo)).
 
 | Cargador | Cómo lo carga Steam | Ventajas y desventajas |
 |---|---|---|
@@ -97,6 +97,29 @@ Copia `OpenSteamTool.dll` y **uno o varios** cargadores al directorio raíz de S
 | `xinput1_4.dll` | Envoltorio completo de XInput (incluidas las ordinales no documentadas); Steam lo carga al inicializar el soporte de mandos | Mismas reglas de reenvío e inyección que `dwmapi.dll`; punto de entrada adicional opcional |
 
 La compilación de `version.dll` se publica a propósito con el sufijo `.disabled`: `steam.exe` no la encuentra y usa la DLL del sistema. Cambia el nombre a `version.dll` solo si necesitas aislamiento temprano, y nunca la actives junto con un juego que use EAC/BE.
+
+### Gestor y cargador IFEO
+
+`build\tools\<Config>\` contiene un paquete completo — `ost-manager.exe`, `ost-loader.exe`, `OpenSteamTool.dll` y los tres proxies — así que no hay que copiar nada a mano.
+
+| Archivo | Función |
+|---|---|
+| `ost-manager.exe` | CLI, menú de consola (`--tui`) y gestor con ventana (doble clic o `--ui`) |
+| `ost-loader.exe` | Ayudante sin ventana que Windows ejecuta en lugar de `steam.exe` a través de IFEO |
+
+**Siempre hay exactamente un punto de entrada activo.** Cada instalación elimina la clave IFEO, los demás proxies y sus copias del payload antes de desplegar el suyo, y `status` informa cuántos puntos de entrada están activos (y avisa si hay más de uno). Los restos de una instalación anterior se reconocen aunque se haya perdido su registro, así que un proxy antiguo nunca puede seguir cargando un payload viejo junto a uno nuevo.
+
+```bat
+ost-manager.exe status
+ost-manager.exe install dwmapi        :: proxy bin\dwmapi.dll (predeterminado)
+ost-manager.exe install version       :: proxy version.dll (aislamiento temprano)
+ost-manager.exe install xinput        :: proxy xinput1_4.dll
+ost-manager.exe install ifeo          :: cargador IFEO, no copia nada dentro de Steam
+ost-manager.exe install ifeo-root     :: cargador IFEO con ost-loader.exe en la raíz de Steam
+ost-manager.exe uninstall
+```
+
+Opciones: `--steam-dir <ruta>`, `--payload <ruta>`, `--restart` (reinicia Steam alrededor del cambio, `--force` para terminar un Steam colgado, `--no-start` para solo cerrarlo), `--dry-run`, `--json`, `--ui`, `--tui`, `--log <ruta>`. Los conmutadores del `ost-manager` original siguen funcionando: `/install-portable <dll>`, `/install-root <dir> <dll>`, `/deploy-dll <dir> [dll]`, `/remove-dll <dir>`, `/inject`, `/watch`, `/uninstall`, `/status`, `/enable-autostart`, `/disable-autostart`, `/silent`.
 
 ### Pasos
 
@@ -118,7 +141,7 @@ La compilación de `version.dll` se publica a propósito con el sufijo `.disable
 
 ### Desinstalación
 
-Cierra Steam, elimina el cargador o cargadores y `OpenSteamTool.dll`, después elimina `<Steam>\bin\diversion64.dll` y la carpeta `<Steam>\opensteamtool\`.
+Cierra Steam y ejecuta `ost-manager.exe uninstall` (elimina la entrada IFEO, los proxies, las copias del payload, el inicio automático y los artefactos de ejecución). Manualmente: cierra Steam, elimina el cargador y `OpenSteamTool.dll`, después elimina `<Steam>\bin\diversion64.dll` y la carpeta `<Steam>\opensteamtool\`.
 
 ## Inicio rápido
 

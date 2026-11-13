@@ -16,21 +16,51 @@ jobs:
       - name: Configure
         run: cmake -S src -B build -G "Ninja Multi-Config"
 
-      # Build only the host tool targets, not the OpenSteamTool DLL.
       - name: Build Release
-        run: cmake --build build --config Release --target ipc_codegen extract_tickets
+        run: |
+          cmake --build build --config Release
+          cmake --build build --config Release --target ipc_codegen extract_tickets ost
 
       - name: Build Debug
-        run: cmake --build build --config Debug --target ipc_codegen extract_tickets
+        run: |
+          cmake --build build --config Debug
+          cmake --build build --config Debug --target ipc_codegen extract_tickets ost
+
+      # ost-manager.exe expects the payload, the proxy DLLs and ost-loader.exe
+      # next to it, so stage the product binaries with each tool build instead
+      # of shipping a lone executable.
+      - name: Stage Release bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bundle\Release | Out-Null
+          Copy-Item build\Release\OpenSteamTool.dll bundle\Release
+          Copy-Item build\Release\dwmapi.dll bundle\Release
+          Copy-Item build\Release\xinput1_4.dll bundle\Release
+          Copy-Item build\Release\version.dll.disabled bundle\Release
+          Copy-Item build\tools\Release\ost-manager.exe bundle\Release
+          Copy-Item build\tools\Release\ost-loader.exe bundle\Release
+          Copy-Item build\tools\Release\extract_tickets.exe bundle\Release
+
+      - name: Stage Debug bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bundle\Debug | Out-Null
+          Copy-Item build\Debug\OpenSteamTool.dll bundle\Debug
+          Copy-Item build\Debug\dwmapi.dll bundle\Debug
+          Copy-Item build\Debug\xinput1_4.dll bundle\Debug
+          Copy-Item build\Debug\version.dll.disabled bundle\Debug
+          Copy-Item build\tools\Debug\ost-manager.exe bundle\Debug
+          Copy-Item build\tools\Debug\ost-loader.exe bundle\Debug
+          Copy-Item build\tools\Debug\extract_tickets.exe bundle\Debug
 
       - name: Upload Release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: OpenSteamTool-Tools-Release
-          path: build/tools/Release/
+          path: bundle/Release/
 
       - name: Upload Debug artifacts
         uses: actions/upload-artifact@v4
         with:
           name: OpenSteamTool-Tools-Debug
-          path: build/tools/Debug/
+          path: bundle/Debug/

@@ -9,6 +9,8 @@
 
 #include <windows.h>
 
+#include "../Common/ProxyPayload.h"
+
 // ─── 1. Real system version.dll binding ──────────────────────────
 // Must bind the real module by its full System32 path: LoadLibrary("version.dll") by name hits this module.
 static HMODULE g_hRealVersion = nullptr;
@@ -234,17 +236,9 @@ static void OpenSteamToolLoad(HMODULE selfModule)
     if (_stricmp(exeName, "steam.exe") != 0)
         return;
 
-    // Locate the payload via this module's own directory: no reliance on DLL search order, and
-    // same-named files planted elsewhere (CWD/PATH) can't hijack it. Payload follows the proxy.
-    char selfPath[MAX_PATH + 16] = {};
-    const DWORD selfLen = GetModuleFileNameA(selfModule, selfPath, MAX_PATH);
-    if (selfLen == 0 || selfLen >= MAX_PATH)
-        return;
-    char* slash = strrchr(selfPath, '\\');
-    if (!slash)
-        return;
-    lstrcpyA(slash + 1, "OpenSteamTool.dll");
-    LoadLibraryA(selfPath);
+    // Payload resolution is shared with the other proxies: next to the proxy,
+    // next to steam.exe, then the path the manager recorded (IFEO / HKCU).
+    ProxyPayload::Load(selfModule);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved)

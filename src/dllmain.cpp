@@ -242,6 +242,17 @@ bool InitializeSteamComponents()
 static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
     Log::Init(selfModule);
     LOG_INFO("OpenSteamTool init thread started");
+
+    // Two payload copies mapped into one process (an IFEO loader plus a proxy, or a stale copy next to
+    // the manager) would install every detour twice and crash Steam. The first copy wins, the second
+    // stands down before it touches anything.
+    if (HMODULE first = GetModuleHandleW(L"OpenSteamTool.dll")) {
+        if (first != reinterpret_cast<HMODULE>(selfModule)) {
+            LOG_WARN("another OpenSteamTool payload ({}) is already loaded in this process; this copy stays inactive",
+                     reinterpret_cast<uintptr_t>(first));
+            return 0;
+        }
+    }
     LOG_INFO("OpenSteamTool attach: steamclient64 already mapped = {} ({})",
              g_steamClientMappedAtAttach,
              g_steamClientMappedAtAttach

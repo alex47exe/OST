@@ -28,6 +28,22 @@ jobs:
       - name: Build Debug
         run: cmake --build build --config Debug
 
+      # ost-manager.exe (CLI/GUI) plus ost-loader.exe (windowless IFEO helper)
+      # ship inside the product folders so they always sit next to
+      # OpenSteamTool.dll and the proxies.
+      - name: Build ost tools
+        run: |
+          cmake --build build --config Release --target ost-manager ost-loader
+          cmake --build build --config Debug --target ost-manager ost-loader
+
+      - name: Stage ost tools into the product folders
+        shell: pwsh
+        run: |
+          Copy-Item build\tools\Release\ost-manager.exe build\Release
+          Copy-Item build\tools\Release\ost-loader.exe build\Release
+          Copy-Item build\tools\Debug\ost-manager.exe build\Debug
+          Copy-Item build\tools\Debug\ost-loader.exe build\Debug
+
       - uses: actions/upload-artifact@v4
         with:
           name: OpenSteamTool-Release

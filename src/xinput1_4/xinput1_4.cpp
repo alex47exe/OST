@@ -3,6 +3,8 @@
 #include <cstring>
 #include <string>
 
+#include "../Common/ProxyPayload.h"
+
 // ─── 1. Real XInput Function Pointers ───────────────────────────
 static HMODULE g_hRealXInput = nullptr;
 
@@ -120,8 +122,8 @@ extern "C" {
 }
 
 // ─── 4. OpenSteamTool Injection ───────────────────────────────────
-// Inject only when the host process is steam.exe (case-insensitive); the payload loads by
-// absolute path from this module's own directory (same rule as the version.dll proxy), no search order.
+// Inject only when the host process is steam.exe (case-insensitive); the payload is resolved by
+// the shared ProxyPayload helper (proxy dir -> steam dir -> manager-recorded path).
 BOOL OpenSteamToolLoad(HMODULE selfModule) {
     char exePath[MAX_PATH];
     const DWORD exeLen = GetModuleFileNameA(NULL, exePath, MAX_PATH);
@@ -134,15 +136,7 @@ BOOL OpenSteamToolLoad(HMODULE selfModule) {
     if (_stricmp(exeName, "steam.exe") != 0)
         return TRUE;
 
-    char selfPath[MAX_PATH + 16] = {};
-    const DWORD selfLen = GetModuleFileNameA(selfModule, selfPath, MAX_PATH);
-    if (selfLen == 0 || selfLen >= MAX_PATH)
-        return TRUE;
-    char* slash = strrchr(selfPath, '\\');
-    if (!slash)
-        return TRUE;
-    lstrcpyA(slash + 1, "OpenSteamTool.dll");
-    return LoadLibraryA(selfPath) != NULL;
+    return ProxyPayload::Load(selfModule) != nullptr;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, PVOID pvReserved) {

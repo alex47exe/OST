@@ -88,7 +88,7 @@ Only the Windows build is supported.
 
 ### Choose a loader
 
-Copy `OpenSteamTool.dll` plus **one or more** loader DLLs to the Steam root directory. Loading several loaders is harmless — a repeated `LoadLibrary` only bumps the module reference count.
+Copy `OpenSteamTool.dll` plus **one** loader DLL to the Steam root directory. Use exactly one entry point: two of them load two copies of `OpenSteamTool.dll` from different folders into the same Steam process and install every hook twice, which crashes Steam. `ost-manager.exe` enforces this for you (see [Manager and IFEO loader](#manager-and-ifeo-loader)).
 
 | Loader | How Steam loads it | Trade-offs |
 |---|---|---|
@@ -97,6 +97,29 @@ Copy `OpenSteamTool.dll` plus **one or more** loader DLLs to the Steam root dire
 | `xinput1_4.dll` | Full XInput wrapper (including undocumented ordinals); loaded by Steam when controller support initialises | Same forwarding and injection rules as `dwmapi.dll`; an optional extra entry point |
 
 The shipped `version.dll` build has a `.disabled` suffix on purpose: `steam.exe` cannot find it and falls back to the system DLL. Rename it to `version.dll` only when you want early isolation, and never enable it together with a game that uses EAC/BE.
+
+### Manager and IFEO loader
+
+`build\tools\<Config>\` holds a complete bundle — `ost-manager.exe`, `ost-loader.exe`, `OpenSteamTool.dll` and the three proxies — so nothing has to be copied by hand.
+
+| File | Role |
+|---|---|
+| `ost-manager.exe` | CLI, console menu (`--tui`) and windowed manager (double-click or `--ui`) |
+| `ost-loader.exe` | Windowless helper that Windows runs instead of `steam.exe` through IFEO |
+
+**Exactly one entry point is active at a time.** Every install removes the IFEO key, the other proxy DLLs and their payload copies before deploying its own, and `status` reports how many entry points are live (and warns when more than one is). Leftovers from an earlier install are recognised even when their bookkeeping is gone, so a stale proxy can never keep loading an old payload next to a fresh one.
+
+```bat
+ost-manager.exe status
+ost-manager.exe install dwmapi        :: bin\dwmapi.dll proxy (default)
+ost-manager.exe install version       :: version.dll proxy (early isolation)
+ost-manager.exe install xinput        :: xinput1_4.dll proxy
+ost-manager.exe install ifeo          :: IFEO loader, nothing copied into Steam
+ost-manager.exe install ifeo-root     :: IFEO loader with ost-loader.exe in the Steam root
+ost-manager.exe uninstall
+```
+
+Options: `--steam-dir <path>`, `--payload <path>`, `--restart` (restart Steam around the change, `--force` to terminate a hanging Steam, `--no-start` to close it only), `--dry-run`, `--json`, `--ui`, `--tui`, `--log <path>`. The switches of the original `ost-manager` keep working: `/install-portable <dll>`, `/install-root <dir> <dll>`, `/deploy-dll <dir> [dll]`, `/remove-dll <dir>`, `/inject`, `/watch`, `/uninstall`, `/status`, `/enable-autostart`, `/disable-autostart`, `/silent`.
 
 ### Steps
 
@@ -118,7 +141,7 @@ The shipped `version.dll` build has a `.disabled` suffix on purpose: `steam.exe`
 
 ### Uninstall
 
-Close Steam, delete the loader DLL(s) and `OpenSteamTool.dll`, then delete `<Steam>\bin\diversion64.dll` and the `<Steam>\opensteamtool\` folder.
+Close Steam and run `ost-manager.exe uninstall` (it removes the IFEO entry, the proxy DLLs, the payload copies, the autostart entry and the runtime artifacts). Manually: close Steam, delete the loader DLL and `OpenSteamTool.dll`, then delete `<Steam>\bin\diversion64.dll` and the `<Steam>\opensteamtool\` folder.
 
 ## Quick start
 
@@ -447,7 +470,7 @@ The script builds Release and Debug, then builds `extract_tickets` (excluded fro
 ### Output
 
 - Debug / Release: `build\<Config>\OpenSteamTool.dll`, `build\<Config>\dwmapi.dll`, `build\<Config>\xinput1_4.dll`, `build\<Config>\version.dll.disabled`
-- Tool: `build\tools\<Config>\extract_tickets.exe`
+- Tools: `build\tools\<Config>\extract_tickets.exe`, `ost-manager.exe`, `ost-loader.exe` (the manager and the loader are staged together with `OpenSteamTool.dll` and the proxies into `build\tools\<Config>\`, so that folder is the ready-to-use bundle)
 
 ## Third-party components
 

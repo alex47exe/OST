@@ -31,6 +31,10 @@ jobs:
       - name: Build ${{ matrix.config }}
         run: cmake --build build --config ${{ matrix.config }}
 
+      # ost is EXCLUDE_FROM_ALL; build it so PRs compile the manager as well.
+      - name: Build ost tool (${{ matrix.config }})
+        run: cmake --build build --config ${{ matrix.config }} --target ost-manager ost-loader
+
       - name: Upload artifacts
         if: success()
         uses: actions/upload-artifact@v4
