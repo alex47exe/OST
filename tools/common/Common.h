@@ -81,6 +81,10 @@ constexpr const wchar_t* kAppRegKey = L"Software\\OpenSteamTool";
 constexpr const wchar_t* kPayloadFileName = L"OpenSteamTool.dll";
 constexpr const wchar_t* kLoaderSwitch = L"--loader";
 constexpr const wchar_t* kSteamDirEnv = L"OST_STEAM_DIR";
+// Data root handed to the Steam the loader starts: the folder the loader lives
+// in, so the payload writes config\lua, logs and the diversion copy there
+// instead of into Steam. Hot injection uses HKCU ConfigDir instead.
+constexpr const wchar_t* kConfigDirEnv = L"OST_CONFIG_DIR";
 constexpr const wchar_t* kIfeoChildEnv = L"OST_IFEO_CHILD";
 
 // Registry value names under kIfeoSteamKey.
@@ -95,5 +99,8 @@ constexpr const wchar_t* kIfeoValuePreviousDebugger = L"OSTPreviousDebugger";
 // PayloadPath as their last fallback when the payload is not next to them or
 // next to steam.exe; the manager writes it on every install.
 constexpr const wchar_t* kAppValuePayloadPath = L"PayloadPath";
+// Data root published for hot-injected payloads (they cannot inherit the
+// loader's environment, so the registry carries the path).
+constexpr const wchar_t* kAppValueConfigDir = L"ConfigDir";
 
 } // namespace ost

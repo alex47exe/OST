@@ -85,8 +85,10 @@ namespace {
 
     static std::filesystem::path CacheDirFor(const Request& request)
     {
-        const std::filesystem::path steamRoot = std::filesystem::path(request.dllPath).parent_path();
-        return steamRoot / "opensteamtool" / request.channel / request.component;
+        const std::filesystem::path root = request.cacheRoot.empty()
+            ? std::filesystem::path(request.dllPath).parent_path()
+            : std::filesystem::path(request.cacheRoot);
+        return root / "opensteamtool" / request.channel / request.component;
     }
 } // namespace
 

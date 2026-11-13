@@ -10,6 +10,10 @@ namespace RemoteToml {
         std::string channel;    // "pattern" or "ipc"
         std::string component;  // "steamclient" or "steamui"
         std::string dllPath;
+        // Where the cache lives. Empty = next to dllPath (in-Steam installs);
+        // portable installs point this at the tool data root so caching never
+        // writes into the Steam directory.
+        std::string cacheRoot;
     };
 
     struct Result {

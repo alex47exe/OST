@@ -254,7 +254,8 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle steamclient, const std::stri
 {
     g_registry.Clear();
 
-    const RemoteToml::Request request{ kIPCChannel, "steamclient", steamclientPath };
+    RemoteToml::Request request{ kIPCChannel, "steamclient", steamclientPath };
+    request.cacheRoot = Config::GetDataDir();
     FetchOutcome fetched = FetchOnce(request);
 
     // Self-heal only when the cache is cross-wired: drop it and refetch once (upstream currently serves the right format, curing it in one go).

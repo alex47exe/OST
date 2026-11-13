@@ -119,7 +119,15 @@ ost-manager.exe install ifeo-root     :: IFEO loader with ost-loader.exe in the 
 ost-manager.exe uninstall
 ```
 
-Options: `--steam-dir <path>`, `--payload <path>`, `--restart` (restart Steam around the change, `--force` to terminate a hanging Steam, `--no-start` to close it only), `--dry-run`, `--json`, `--ui`, `--tui`, `--log <path>`. The switches of the original `ost-manager` keep working: `/install-portable <dll>`, `/install-root <dir> <dll>`, `/deploy-dll <dir> [dll]`, `/remove-dll <dir>`, `/inject`, `/watch`, `/uninstall`, `/status`, `/enable-autostart`, `/disable-autostart`, `/silent`.
+Options: `--steam-dir <path>`, `--payload <path>`, `--data-dir <path>`, `--restart` (restart Steam around the change, `--force` to terminate a hanging Steam, `--no-start` to close it only), `--dry-run`, `--json`, `--ui`, `--tui`, `--log <path>`. The switches of the original `ost-manager` keep working: `/install-portable <dll>`, `/install-root <dir> <dll>`, `/deploy-dll <dir> [dll]`, `/remove-dll <dir>`, `/inject`, `/watch`, `/uninstall`, `/status`, `/enable-autostart`, `/disable-autostart`, `/silent`.
+
+#### Where the tool writes
+
+Steam's own files (`steamclient64.dll`, `steamui.dll`, `userdata`) always come from the real Steam folder, but everything the tool **writes** follows a data root: `opensteamtool.toml`, `config\lua`, the logs, the metadata caches and `bin\diversion64.dll`.
+
+- Default data root: the folder holding `ost-manager.exe` — so a portable `ost` behaves exactly as if it sat inside Steam without writing into Steam. When the manager is placed inside Steam, the data root is Steam itself.
+- `--data-dir <path>` overrides it; `config\lua` is created there on every install.
+- Hot injection (`inject`, `watch`) cannot change the environment of an already running Steam, so the manager publishes the data root in `HKCU\Software\OpenSteamTool\ConfigDir` and the payload reads it on attach. The IFEO loader additionally passes `OST_CONFIG_DIR` to the Steam it starts, which takes precedence.
 
 ### Steps
 
@@ -138,6 +146,8 @@ Options: `--steam-dir <path>`, `--payload <path>`, `--restart` (restart Steam ar
 | `<Steam>\opensteamtool\ipc\steamclient\<sha256>.toml` | Cached IPC descriptors |
 | `<Steam>\bin\diversion64.dll` | Shadow copy of `steamclient64.dll` used for isolation |
 | `<Steam>\cloud_redirect.dll` | Optional CloudRedirect payload (`[cloud]`) |
+
+When you install with `ost-manager.exe`, the rows above are created under the **data root** instead of `<Steam>` (see [Where the tool writes](#where-the-tool-writes)).
 
 ### Uninstall
 

@@ -26,7 +26,9 @@
 #include <memory>
 
 namespace Log {
-    void Init(OSTPlatform::DynamicLibrary::ModuleHandle selfModule);
+    // logRoot empty -> the payload's own directory (in-Steam installs).
+    // Portable installs pass the tool data root so logs stay out of Steam.
+    void Init(OSTPlatform::DynamicLibrary::ModuleHandle selfModule, const std::string& logRoot = {});
     void InitModules();
     void ApplyConfigLevel();
 
@@ -54,7 +56,7 @@ namespace Log {
 #include "OSTPlatform/include/DynamicLibrary.h"
 
 namespace Log {
-    inline void Init(OSTPlatform::DynamicLibrary::ModuleHandle) {}
+    inline void Init(OSTPlatform::DynamicLibrary::ModuleHandle, const std::string& = {}) {}
     inline void InitModules() {}
     inline void ApplyConfigLevel() {}
     inline void InstallPlatformLogSink() {}

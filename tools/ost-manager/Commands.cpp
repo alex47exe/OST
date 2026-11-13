@@ -32,14 +32,44 @@ std::wstring ResolvePayload(const Options& options, const std::wstring& steamDir
     return beside; // reported as missing by the caller
 }
 
-void PublishRuntimePaths(const std::wstring& steamDir, const std::wstring& payloadPath) {
-    (void)steamDir;
+// The payload resolves everything it writes -- opensteamtool.toml, config\lua,
+// logs, metadata caches and the diversion copy -- from a data root. Steam's own
+// files (steamclient64.dll, userdata) always come from the real Steam folder,
+// but the tool's state lives where the manager lives, so a portable ost behaves
+// exactly as if it sat inside Steam without writing into Steam.
+std::wstring RuntimeDataRoot(const Options& options, const std::wstring& steamDir) {
+    return ResolveDataRoot(options.dataDir, steamDir);
+}
+
+void PublishRuntimePaths(const Options* options, const std::wstring& steamDir,
+                         const std::wstring& payloadPath) {
     if (payloadPath.empty()) return;
     // The proxies fall back to HKCU\Software\OpenSteamTool\PayloadPath when the
     // payload is not next to them or next to steam.exe (hot-inject / portable).
     std::wstring error;
     if (!RegWriteString(HKEY_CURRENT_USER, kAppRegKey, kAppValuePayloadPath, payloadPath, error)) {
         LogWarn(L"could not record the payload path: " + error);
+    }
+
+    // A hot-injected payload cannot inherit our environment, so the data root
+    // is published through the registry; the loader passes OST_CONFIG_DIR to
+    // the Steam it starts, which wins over this value.
+    static const Options kNoOverride;
+    const std::wstring dataRoot = RuntimeDataRoot(options ? *options : kNoOverride, steamDir);
+    if (dataRoot.empty() || IEquals(dataRoot, steamDir)) {
+        RegDeleteValue(HKEY_CURRENT_USER, kAppRegKey, kAppValueConfigDir);
+        return;
+    }
+    if (!RegWriteString(HKEY_CURRENT_USER, kAppRegKey, kAppValueConfigDir, dataRoot, error)) {
+        LogWarn(L"could not record the data root: " + error);
+        return;
+    }
+    // Create the folders the payload will use, so the layout is visible before
+    // the first launch (and lua scripts have a place to go).
+    if (EnsureDirectory(dataRoot + L"\\config\\lua")) {
+        LogInfo(L"tool data root: " + dataRoot + L" (config\\lua created)");
+    } else {
+        LogInfo(L"tool data root: " + dataRoot);
     }
 }
 
@@ -94,6 +124,7 @@ struct StatusSnapshot {
     std::wstring payloadPath;
     bool payloadExists = false;
     std::uint64_t payloadSize = 0;
+    std::wstring dataRoot;
     bool autostart = false;
     bool watcherRunning = false;
 };
@@ -104,6 +135,7 @@ StatusSnapshot CollectStatus(const Options& options) {
     snapshot.processes = FindSteamProcesses();
     snapshot.ifeo = QueryIfeo();
     snapshot.proxies = QueryProxies(snapshot.steamDir);
+    snapshot.dataRoot = RuntimeDataRoot(options, snapshot.steamDir);
     const std::wstring deployed =
         snapshot.steamDir.empty() ? L"" : snapshot.steamDir + L"\\" + kPayloadFileName;
     snapshot.payloadPath =
@@ -201,6 +233,7 @@ int CmdStatus(const Options& options) {
         json += L"\"payload\":{\"path\":\"" + JsonEscape(snapshot.payloadPath) + L"\",\"exists\":" +
                 (snapshot.payloadExists ? L"true" : L"false") + L",\"size\":" +
                 std::to_wstring(snapshot.payloadSize) + L"},";
+        json += L"\"dataRoot\":\"" + JsonEscape(snapshot.dataRoot) + L"\",";
         json += L"\"autostart\":" + std::wstring(snapshot.autostart ? L"true" : L"false") + L",";
         json += L"\"watcher\":" + std::wstring(snapshot.watcherRunning ? L"true" : L"false");
         json += L"}";
@@ -220,6 +253,7 @@ int CmdStatus(const Options& options) {
         {L"Payload", snapshot.payloadExists
                           ? snapshot.payloadPath + L" (" + std::to_wstring(snapshot.payloadSize) + L" bytes)"
                           : L"missing (" + snapshot.payloadPath + L")"},
+        {L"Data root", snapshot.dataRoot.empty() ? L"-" : snapshot.dataRoot},
         {L"Autostart", snapshot.autostart ? L"enabled" : L"disabled"},
         {L"Watcher", snapshot.watcherRunning ? L"running" : L"stopped"},
         {L"Log file", LogFilePath().empty() ? L"disabled" : LogFilePath()},
@@ -270,7 +304,7 @@ int InstallProxy(const Options& options, ProxyKind kind, const std::wstring& ste
     }
     // The proxy loads the payload from its own directory, so the recorded path
     // is the deployed copy, not the one next to the manager.
-    PublishRuntimePaths(steamDir, DeployedPayloadPath(kind, steamDir));
+    PublishRuntimePaths(&options, steamDir, DeployedPayloadPath(kind, steamDir));
     LogInfo(L"installed the " + ProxyKindName(kind) + L" proxy entry point (single entry point enforced)");
 
     if (!options.restart) {
@@ -326,7 +360,7 @@ int CmdInstallIfeo(const Options& options, bool rootMode) {
         LogError(L"could not remove the proxy entry points: " + error);
         return 1;
     }
-    RemoveRuntimeArtifacts(steamDir, error);
+    RemoveRuntimeArtifacts(steamDir, RuntimeDataRoot(options, steamDir), error);
 
     std::wstring loaderExe = loader;
     std::wstring effectivePayload = payload;
@@ -353,7 +387,7 @@ int CmdInstallIfeo(const Options& options, bool rootMode) {
         LogError(error);
         return 1;
     }
-    PublishRuntimePaths(steamDir, effectivePayload);
+    PublishRuntimePaths(&options, steamDir, effectivePayload);
     LogInfo(L"IFEO loader installed (" + std::wstring(rootMode ? L"Steam root" : L"portable") +
             L" mode, single entry point enforced)");
     LogInfo(L"next launch of steam.exe is intercepted before its entry point");
@@ -427,7 +461,7 @@ int CmdUninstallProxies(const Options& options) {
         LogError(error);
         return 1;
     }
-    RemoveRuntimeArtifacts(steamDir, error);
+    RemoveRuntimeArtifacts(steamDir, RuntimeDataRoot(options, steamDir), error);
     LogInfo(L"proxy entry points removed; the IFEO entry and autostart were left untouched");
 
     if (restartAfter) {
@@ -496,8 +530,9 @@ int CmdUninstall(const Options& options) {
 
     if (!RemoveDeployedProxies(steamDir, error)) LogWarn(error);
     if (!RemoveTrackedFiles(steamDir, error)) LogWarn(error);
-    RemoveRuntimeArtifacts(steamDir, error);
+    RemoveRuntimeArtifacts(steamDir, RuntimeDataRoot(options, steamDir), error);
     RegDeleteValue(HKEY_CURRENT_USER, kAppRegKey, kAppValuePayloadPath);
+    RegDeleteValue(HKEY_CURRENT_USER, kAppRegKey, kAppValueConfigDir);
     if (!RegKeyHasValues(HKEY_CURRENT_USER, kAppRegKey)) {
         RegDeleteKeyTree(HKEY_CURRENT_USER, kAppRegKey);
     }
@@ -526,7 +561,7 @@ int CmdInject(const Options& options) {
         return 0;
     }
 
-    PublishRuntimePaths(steamDir, payload);
+    PublishRuntimePaths(&options, steamDir, payload);
 
     if (options.restart && !FindSteamProcesses(false).empty()) {
         std::wstring stopError;
@@ -554,7 +589,7 @@ int CmdWatch(const Options& options) {
         LogError(L"payload DLL not found: " + payload);
         return 1;
     }
-    PublishRuntimePaths(steamDir, payload);
+    PublishRuntimePaths(&options, steamDir, payload);
     return RunWatcher(steamDir, payload);
 }
 
@@ -648,8 +683,15 @@ int CmdLog(const Options& options) {
 
 } // namespace
 
-Options ParseOptions(const std::vector<std::wstring>& args, bool& outHelp) {
-    Options options;
+std::wstring ResolveDataRoot(const std::wstring& dataDirOverride, const std::wstring& steamDir) {
+    if (!dataDirOverride.empty()) return dataDirOverride;
+    const std::wstring self = SelfDir();
+    if (self.empty()) return steamDir;
+    if (steamDir.empty() || IEquals(self, steamDir)) return steamDir;
+    return self;
+}
+
+Options ParseOptions(const std::vector<std::wstring>& args, bool& outHelp) {    Options options;
     options.rawArgs = args;
     outHelp = false;
 
@@ -661,6 +703,7 @@ Options ParseOptions(const std::vector<std::wstring>& args, bool& outHelp) {
         }
         if (IEquals(arg, L"--steam-dir") && i + 1 < args.size()) { options.steamDir = args[++i]; continue; }
         if (IEquals(arg, L"--payload") && i + 1 < args.size()) { options.payloadPath = args[++i]; continue; }
+        if (IEquals(arg, L"--data-dir") && i + 1 < args.size()) { options.dataDir = args[++i]; continue; }
         if (IEquals(arg, L"--log") && i + 1 < args.size()) { options.logPath = args[++i]; continue; }
         if (IEquals(arg, L"--no-log-file")) { options.noLogFile = true; continue; }
         if (IEquals(arg, L"--quiet") || IEquals(arg, L"/quiet") || IEquals(arg, L"/silent")) { options.quiet = true; continue; }
@@ -795,6 +838,8 @@ void PrintHelp() {
         L"Options\n"
         L"  --steam-dir <path>        Override Steam detection\n"
         L"  --payload <path>          Payload DLL (default: OpenSteamTool.dll next to ost-manager.exe)\n"
+        L"  --data-dir <path>         Folder that acts as the Steam folder for config\\lua, logs and\n"
+        L"                            caches (default: the folder holding ost-manager.exe)\n"
         L"  --log <path>              Log file (default: ost.log next to ost-manager.exe)\n"
         L"  --no-log-file             Write nothing to disk\n"
         L"  --quiet                   Suppress log echo on the console\n"

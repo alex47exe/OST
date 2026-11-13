@@ -151,7 +151,8 @@ namespace PatternLoader {
 bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& dllPath, const std::string& component)
 {
     namespace fs = std::filesystem;
-    const RemoteToml::Request req{ kPatternChannel, component, dllPath };
+    RemoteToml::Request req{ kPatternChannel, component, dllPath };
+    req.cacheRoot = Config::GetDataDir();
     const std::string dllName = fs::path(dllPath).filename().string();
     const bool derive = Config::GetRemoteAutoDerive();
 

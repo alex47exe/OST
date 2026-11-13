@@ -36,6 +36,8 @@ namespace Config {
     ManifestTimeouts GetManifestTimeouts();
     LogLevel GetLogLevel();
     std::string GetLogDir();
+    // Directory that holds opensteamtool.toml and everything the tool writes.
+    std::string GetDataDir();
     std::vector<std::string> GetLuaPaths();
     std::string GetRemoteUrlTemplate();
     bool GetRemoteAutoDerive();
@@ -62,6 +64,8 @@ namespace Config {
 
     // derived from configPath: <steam>/opensteamtool/
     inline std::string logDir;
+    // Root that holds opensteamtool.toml and everything the tool writes (Steam or portable folder).
+    inline std::string dataDir;
 
     // [lua]
     inline std::vector<std::string> luaPaths;

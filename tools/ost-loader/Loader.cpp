@@ -174,10 +174,18 @@ int RunLoader(const std::vector<std::wstring>& args) {
     }
 
     // The child inherits our environment block: the recursion guard keeps a
-    // re-entered loader from forking steam.exe, and OST_STEAM_DIR lets a manager
-    // started from that process find the installation it was launched for.
+    // re-entered loader from forking steam.exe, OST_STEAM_DIR lets a manager
+    // started from that process find the installation, and OST_CONFIG_DIR makes
+    // the payload keep config\lua, logs and the diversion copy in the tool
+    // folder instead of writing them into Steam.
     SetEnvVar(kIfeoChildEnv, L"1");
     SetEnvVar(kSteamDirEnv, steamDir);
+    const std::wstring selfDir = SelfDir();
+    if (!selfDir.empty() && !IEquals(selfDir, steamDir)) {
+        SetEnvVar(kConfigDirEnv, selfDir);
+    } else {
+        SetEnvVar(kConfigDirEnv, L"");
+    }
 
     std::wstring commandLine = BuildCommandLine(targetExe, forwarded);
     LogInfo(L"loader: command line " + commandLine);

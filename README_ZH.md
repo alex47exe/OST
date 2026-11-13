@@ -119,7 +119,15 @@ ost-manager.exe install ifeo-root     :: IFEO 加载器，并把 ost-loader.exe 
 ost-manager.exe uninstall
 ```
 
-选项：`--steam-dir <路径>`、`--payload <路径>`、`--restart`（安装前后重启 Steam，`--force` 强制结束卡住的 Steam，`--no-start` 只关闭不启动）、`--dry-run`、`--json`、`--ui`、`--tui`、`--log <路径>`。原版 `ost-manager` 的开关继续可用：`/install-portable <dll>`、`/install-root <dir> <dll>`、`/deploy-dll <dir> [dll]`、`/remove-dll <dir>`、`/inject`、`/watch`、`/uninstall`、`/status`、`/enable-autostart`、`/disable-autostart`、`/silent`。
+选项：`--steam-dir <路径>`、`--payload <路径>`、`--data-dir <路径>`、`--restart`（安装前后重启 Steam，`--force` 强制结束卡住的 Steam，`--no-start` 只关闭不启动）、`--dry-run`、`--json`、`--ui`、`--tui`、`--log <路径>`。原版 `ost-manager` 的开关继续可用：`/install-portable <dll>`、`/install-root <dir> <dll>`、`/deploy-dll <dir> [dll]`、`/remove-dll <dir>`、`/inject`、`/watch`、`/uninstall`、`/status`、`/enable-autostart`、`/disable-autostart`、`/silent`。
+
+#### 工具写入位置
+
+Steam 自身的文件（`steamclient64.dll`、`steamui.dll`、`userdata`）始终来自真实的 Steam 目录，但工具**写入**的内容都跟随一个数据根目录：`opensteamtool.toml`、`config\lua`、日志、元数据缓存以及 `bin\diversion64.dll`。
+
+- 默认数据根目录：`ost-manager.exe` 所在的文件夹——便携版 `ost` 因此表现得就像身在 Steam 里，却不往 Steam 写任何东西。若把管理器放进 Steam 目录，数据根目录就是 Steam 目录。
+- `--data-dir <路径>` 可覆盖它；每次安装都会在其中创建 `config\lua`。
+- 热注入（`inject`、`watch`）无法改变已在运行的 Steam 的环境，因此管理器把数据根目录写入 `HKCU\Software\OpenSteamTool\ConfigDir`，载荷在加载时读取它。IFEO 加载器还会把 `OST_CONFIG_DIR` 传给由它启动的 Steam，该变量优先级更高。
 
 ### 步骤
 
@@ -138,6 +146,8 @@ ost-manager.exe uninstall
 | `<Steam>\opensteamtool\ipc\steamclient\<sha256>.toml` | IPC 描述文件缓存 |
 | `<Steam>\bin\diversion64.dll` | 用于隔离的 `steamclient64.dll` 副本 |
 | `<Steam>\cloud_redirect.dll` | 可选的 CloudRedirect 载荷（`[cloud]`） |
+
+用 `ost-manager.exe` 安装时，上表中的文件会创建在**数据根目录**而不是 `<Steam>`（见 [工具写入位置](#工具写入位置)）。
 
 ### 卸载
 

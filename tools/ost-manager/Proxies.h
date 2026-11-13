@@ -42,7 +42,9 @@ void TrackDeployedFile(const std::wstring& path);
 bool RemoveTrackedFiles(const std::wstring& steamDir, std::wstring& outError);
 
 // Removes runtime artifacts that are not proxies (diversion shadow module).
-bool RemoveRuntimeArtifacts(const std::wstring& steamDir, std::wstring& outError);
+// The diversion copy follows the data root, so both locations are cleaned.
+bool RemoveRuntimeArtifacts(const std::wstring& steamDir, const std::wstring& dataRoot,
+                            std::wstring& outError);
 
 std::wstring ProxyKindName(ProxyKind kind);
 ProxyKind ParseProxyKind(const std::wstring& value);

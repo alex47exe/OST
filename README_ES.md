@@ -119,7 +119,15 @@ ost-manager.exe install ifeo-root     :: cargador IFEO con ost-loader.exe en la 
 ost-manager.exe uninstall
 ```
 
-Opciones: `--steam-dir <ruta>`, `--payload <ruta>`, `--restart` (reinicia Steam alrededor del cambio, `--force` para terminar un Steam colgado, `--no-start` para solo cerrarlo), `--dry-run`, `--json`, `--ui`, `--tui`, `--log <ruta>`. Los conmutadores del `ost-manager` original siguen funcionando: `/install-portable <dll>`, `/install-root <dir> <dll>`, `/deploy-dll <dir> [dll]`, `/remove-dll <dir>`, `/inject`, `/watch`, `/uninstall`, `/status`, `/enable-autostart`, `/disable-autostart`, `/silent`.
+Opciones: `--steam-dir <ruta>`, `--payload <ruta>`, `--data-dir <ruta>`, `--restart` (reinicia Steam alrededor del cambio, `--force` para terminar un Steam colgado, `--no-start` para solo cerrarlo), `--dry-run`, `--json`, `--ui`, `--tui`, `--log <ruta>`. Los conmutadores del `ost-manager` original siguen funcionando: `/install-portable <dll>`, `/install-root <dir> <dll>`, `/deploy-dll <dir> [dll]`, `/remove-dll <dir>`, `/inject`, `/watch`, `/uninstall`, `/status`, `/enable-autostart`, `/disable-autostart`, `/silent`.
+
+#### Dónde escribe la herramienta
+
+Los archivos propios de Steam (`steamclient64.dll`, `steamui.dll`, `userdata`) siempre salen de la carpeta real de Steam, pero todo lo que la herramienta **escribe** sigue una raíz de datos: `opensteamtool.toml`, `config\lua`, los registros, las cachés de metadatos y `bin\diversion64.dll`.
+
+- Raíz de datos por defecto: la carpeta donde está `ost-manager.exe`, así un `ost` portátil se comporta como si estuviera dentro de Steam sin escribir en Steam. Si el gestor se coloca dentro de Steam, la raíz es Steam.
+- `--data-dir <ruta>` la sobrescribe; `config\lua` se crea ahí en cada instalación.
+- La inyección en caliente (`inject`, `watch`) no puede cambiar el entorno de un Steam ya en ejecución, así que el gestor publica la raíz de datos en `HKCU\Software\OpenSteamTool\ConfigDir` y el payload la lee al cargarse. El cargador IFEO además pasa `OST_CONFIG_DIR` al Steam que inicia, y ese valor tiene prioridad.
 
 ### Pasos
 
@@ -138,6 +146,8 @@ Opciones: `--steam-dir <ruta>`, `--payload <ruta>`, `--restart` (reinicia Steam 
 | `<Steam>\opensteamtool\ipc\steamclient\<sha256>.toml` | Caché de descriptores IPC |
 | `<Steam>\bin\diversion64.dll` | Copia sombra de `steamclient64.dll` usada para el aislamiento |
 | `<Steam>\cloud_redirect.dll` | Carga opcional de CloudRedirect (`[cloud]`) |
+
+Si instalas con `ost-manager.exe`, las filas anteriores se crean bajo la **raíz de datos** en lugar de `<Steam>` (ver [Dónde escribe la herramienta](#dónde-escribe-la-herramienta)).
 
 ### Desinstalación
 

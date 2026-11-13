@@ -341,12 +341,17 @@ bool RemoveDeployedProxies(const std::wstring& steamDir, std::wstring& outError)
     return ok;
 }
 
-bool RemoveRuntimeArtifacts(const std::wstring& steamDir, std::wstring& outError) {
+bool RemoveRuntimeArtifacts(const std::wstring& steamDir, const std::wstring& dataRoot,
+                            std::wstring& outError) {
     (void)outError;
-    if (steamDir.empty()) return true;
     std::wstring localError;
-    // Best effort: Steam may still hold the module open.
-    DeleteFileIfExists(steamDir + L"\\bin\\diversion64.dll", localError);
+    if (!steamDir.empty()) {
+        // Best effort: Steam may still hold the module open.
+        DeleteFileIfExists(steamDir + L"\\bin\\diversion64.dll", localError);
+    }
+    if (!dataRoot.empty() && !IEquals(dataRoot, steamDir)) {
+        DeleteFileIfExists(dataRoot + L"\\bin\\diversion64.dll", localError);
+    }
     return true;
 }
 

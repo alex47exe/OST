@@ -73,12 +73,14 @@ namespace {
 
 namespace Log {
 
-    void Init(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
+    void Init(OSTPlatform::DynamicLibrary::ModuleHandle selfModule, const std::string& logRoot) {
         bool expected = false;
         if (!g_mainReady.compare_exchange_strong(expected, true)) return;
 
         try {
-            auto dir = OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule);
+            std::filesystem::path dir = logRoot.empty()
+                ? OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule)
+                : std::filesystem::path(logRoot);
             if (dir.empty()) dir = ".";
             auto logDir = (dir / "opensteamtool").string();
             std::filesystem::create_directories(logDir);

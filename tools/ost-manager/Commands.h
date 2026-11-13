@@ -22,6 +22,7 @@ struct Options {
     std::vector<std::wstring> rawArgs;
     std::wstring steamDir;
     std::wstring payloadPath;
+    std::wstring dataDir;
     std::wstring logPath;
     bool noLogFile = false;
     bool quiet = false;
@@ -38,6 +39,13 @@ struct Options {
 };
 
 Options ParseOptions(const std::vector<std::wstring>& args, bool& outHelp);
+
+// Folder that acts as the Steam folder for everything the tool writes
+// (opensteamtool.toml, config\lua, logs, caches, diversion copy). Empty override
+// means "the folder holding ost-manager.exe", or the Steam folder itself when
+// the manager was placed inside Steam.
+std::wstring ResolveDataRoot(const std::wstring& dataDirOverride, const std::wstring& steamDir);
+
 int RunCommand(const Options& options);
 void PrintHelp();
 void PrintVersion();

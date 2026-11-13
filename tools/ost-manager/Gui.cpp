@@ -1,5 +1,6 @@
 #include "Gui.h"
 
+#include "Commands.h"
 #include "Common.h"
 #include "GuiStrings.h"
 #include "Ifeo.h"
@@ -81,6 +82,8 @@ struct GuiState {
     std::atomic<bool> busy{false};
     std::wstring steamDir;
     std::wstring payloadPath;
+    // Empty: the folder holding ost-manager.exe acts as the data root.
+    std::wstring dataDir;
     std::uint64_t logOffset = 0;
     std::wstring lastCommand;
     std::string pendingLogBytes;
@@ -292,7 +295,11 @@ void RefreshStatus() {
                                    : (payloadInSteam ? Text().statusSteamLocked
                                                     : (steamRunning ? Text().statusSteamRestart
                                                                     : Text().statusReady));
-        SendMessageW(g.statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(hint));
+        // The payload keeps config\lua, logs and caches in the data root, so it
+        // is always one glance away (default: this folder).
+        const std::wstring dataRoot = ResolveDataRoot(g.dataDir, g.steamDir);
+        const std::wstring text = std::wstring(hint) + (dataRoot.empty() ? L"" : L"  |  " + dataRoot);
+        SendMessageW(g.statusBar, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
     }
 }
 
@@ -529,7 +536,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 } // namespace
 
 int RunGui(const Options& options) {
-    (void)options;
+    g.dataDir = options.dataDir;
 
     // System-DPI awareness keeps the fixed layout readable on scaled displays.
     using SetContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);

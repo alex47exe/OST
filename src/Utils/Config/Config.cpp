@@ -18,6 +18,7 @@ namespace {
         ManifestTimeouts manifestTimeouts;
         LogLevel logLevel = LogLevel::Debug;
         std::string logDir;
+        std::string dataDir;
         std::vector<std::string> luaPaths;
         std::string remoteUrlTemplate;
         std::string remoteOrder = "gh-proxy-first";
@@ -53,6 +54,7 @@ namespace {
     Snapshot MakeDefaultSnapshot(const std::string& configPath) {
         Snapshot snapshot;
         std::filesystem::path p(configPath);
+        snapshot.dataDir = p.parent_path().string();
         snapshot.logDir = (p.parent_path() / "opensteamtool").string();
         return snapshot;
     }
@@ -65,6 +67,7 @@ namespace {
         manifestFailover       = snapshot.manifestFailover;
         logLevel               = snapshot.logLevel;
         logDir                 = snapshot.logDir;
+        dataDir                = snapshot.dataDir;
         luaPaths               = snapshot.luaPaths;
         remoteUrlTemplate      = snapshot.remoteUrlTemplate;
         remoteOrder            = snapshot.remoteOrder;
@@ -281,6 +284,11 @@ namespace {
     std::string GetLogDir() {
         std::lock_guard lock(g_mutex);
         return logDir;
+    }
+
+    std::string GetDataDir() {
+        std::lock_guard lock(g_mutex);
+        return dataDir;
     }
 
     std::vector<std::string> GetLuaPaths() {

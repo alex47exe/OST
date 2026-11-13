@@ -148,31 +148,118 @@ static uint32_t DiversionWatchdog() {
     return 0;
 }
 
-// prepare key runtime paths.
-bool InitializeSteamComponents()
-{
-    // The Steam root comes from the host exe, not CWD: when steam.exe is launched by an external
-    // tool, CWD is the inherited tool directory, and using it makes steamclient64.dll resolution fail
-    // and the whole init fail silently and totally (zero hooks, unlock dead). steamclient64.dll is
-    // always in the same directory as steam.exe, so the exe path is the only trustworthy anchor.
+bool IsExistingDirectory(const std::string& path) {
+    if (path.empty()) return false;
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+bool ReadEnvironmentPath(const char* name, std::string& out) {
+    char buffer[kRuntimePathCapacity] = {};
+    const DWORD length = GetEnvironmentVariableA(name, buffer, kRuntimePathCapacity);
+    if (length == 0 || length >= kRuntimePathCapacity) return false;
+    if (!IsExistingDirectory(buffer)) return false;
+    out = buffer;
+    return true;
+}
+
+bool ReadRegistryPath(const char* valueName, std::string& out) {
+    char buffer[kRuntimePathCapacity] = {};
+    DWORD size = sizeof(buffer);
+    if (RegGetValueA(HKEY_CURRENT_USER, "Software\\OpenSteamTool", valueName,
+                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, buffer, &size) != ERROR_SUCCESS) {
+        return false;
+    }
+    if (!IsExistingDirectory(buffer)) return false;
+    out = buffer;
+    return true;
+}
+
+bool FileExistsA(const std::string& path) {
+    if (path.empty()) return false;
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+bool SamePath(const std::string& lhs, const std::string& rhs) {
+    return _stricmp(lhs.c_str(), rhs.c_str()) == 0;
+}
+
+// Where the tool keeps its own state. The host executable always decides the
+// Steam root (steamclient64.dll lives next to steam.exe), but everything the
+// tool writes -- opensteamtool.toml, config\lua, the diversion copy, logs and
+// the metadata cache -- follows a separate data root. A portable install points
+// that root at the folder holding ost.exe / OpenSteamTool.dll, so the tool
+// behaves exactly as if it sat inside Steam without writing into Steam.
+struct RuntimeRoots {
+    std::string steamDir;
+    std::string dataDir;
+    std::string dataSource;
+    std::string configPath;
+    std::string luaDir;
+    std::string diversionPath;
+    bool valid = false;
+};
+
+RuntimeRoots ResolveRoots(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
+    RuntimeRoots roots;
     const std::filesystem::path exePath = OSTPlatform::DynamicLibrary::GetMainExecutablePath();
     const std::string exeName = exePath.filename().string();
-    if (exeName.empty() || _stricmp(exeName.c_str(), "steam.exe") != 0) {
-        LOG_INFO("InitializeSteamComponents: host is not steam.exe ({}), skipping",
-                 exeName.empty() ? "(unknown)" : exeName);
+    if (exeName.empty() || _stricmp(exeName.c_str(), "steam.exe") != 0) return roots;
+    roots.steamDir = exePath.parent_path().string();
+    if (roots.steamDir.empty()) return roots;
+
+    roots.dataDir = roots.steamDir;
+    roots.dataSource = "steam";
+
+    std::string candidate;
+    if (ReadEnvironmentPath("OST_CONFIG_DIR", candidate)) {
+        roots.dataDir = candidate;
+        roots.dataSource = "OST_CONFIG_DIR";
+    } else if (ReadRegistryPath("ConfigDir", candidate)) {
+        roots.dataDir = candidate;
+        roots.dataSource = "HKCU ConfigDir";
+    } else {
+        // Auto-detect a portable layout even when no manager value was recorded
+        // (the loader was started by hand, or the folder was moved).
+        const std::filesystem::path moduleDir = OSTPlatform::DynamicLibrary::GetModuleDirectory(selfModule);
+        const std::string payloadDir = moduleDir.string();
+        if (!payloadDir.empty() && !SamePath(payloadDir, roots.steamDir) &&
+            (FileExistsA(payloadDir + "\\opensteamtool.toml") ||
+             IsExistingDirectory(payloadDir + "\\config\\lua"))) {
+            roots.dataDir = payloadDir;
+            roots.dataSource = "payload directory";
+        }
+    }
+
+    roots.configPath = roots.dataDir + "\\opensteamtool.toml";
+    roots.luaDir = roots.dataDir + "\\config\\lua";
+    std::string envLua;
+    if (ReadEnvironmentPath("OST_LUA_DIR", envLua)) roots.luaDir = envLua;
+    // Mirror the Steam layout under the data root: <steam>\bin\diversion64.dll
+    // becomes <data>\bin\diversion64.dll for portable installs.
+    roots.diversionPath = roots.dataDir + "\\bin\\diversion64.dll";
+    roots.valid = true;
+    return roots;
+}
+
+// prepare key runtime paths.
+bool InitializeSteamComponents(const RuntimeRoots& roots)
+{
+    if (!roots.valid) {
+        LOG_INFO("InitializeSteamComponents: host is not steam.exe, skipping");
         return false;
     }
-    const std::string steamInstallPath = exePath.parent_path().string();
-    if (steamInstallPath.empty()) {
-        return false;
+    LOG_INFO("Steam install path: {}", roots.steamDir);
+    if (roots.dataDir != roots.steamDir) {
+        LOG_INFO("tool data root: {} (from {})", roots.dataDir, roots.dataSource);
     }
-    LOG_INFO("Steam install path: {} (host {})", steamInstallPath, exePath.string());
-    sprintf_s(SteamInstallPath, kRuntimePathCapacity, "%s", steamInstallPath.c_str());
+    sprintf_s(SteamInstallPath, kRuntimePathCapacity, "%s", roots.steamDir.c_str());
     sprintf_s(SteamclientPath, kRuntimePathCapacity, "%s\\steamclient64.dll",  SteamInstallPath);
     sprintf_s(SteamUIPath,     kRuntimePathCapacity, "%s\\steamui.dll",        SteamInstallPath);
-    sprintf_s(DiversionPath,   kRuntimePathCapacity, "%s\\bin\\diversion64.dll", SteamInstallPath);
-    sprintf_s(LuaDir,          kRuntimePathCapacity, "%s\\config\\lua",        SteamInstallPath);
-    sprintf_s(ConfigPath,      kRuntimePathCapacity, "%s\\opensteamtool.toml", SteamInstallPath);
+    sprintf_s(DiversionPath,   kRuntimePathCapacity, "%s", roots.diversionPath.c_str());
+    sprintf_s(ConfigPath,      kRuntimePathCapacity, "%s", roots.configPath.c_str());
+    sprintf_s(LuaDir,          kRuntimePathCapacity, "%s", roots.luaDir.c_str());
     
     // Diversion shadow module: every hook is applied only to a full copy of steamclient64.dll, and
     // the original module stays 100% clean so Denuvo/RE engine integrity checks pass.
@@ -240,7 +327,9 @@ bool InitializeSteamComponents()
 // memory, or installs detours runs here on a worker thread — we MUST NOT do
 // any of that from inside DllMain (loader lock).
 static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule) {
-    Log::Init(selfModule);
+    // Resolve before logging so main.log lands in the data root too.
+    const RuntimeRoots roots = ResolveRoots(selfModule);
+    Log::Init(selfModule, roots.dataDir);
     LOG_INFO("OpenSteamTool init thread started");
 
     // Two payload copies mapped into one process (an IFEO loader plus a proxy, or a stale copy next to
@@ -259,7 +348,7 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
                  ? "we arrived late, first-load redirect cannot work"
                  : "first load not yet happened, FirstLoadRedirect may catch it");
 
-    if (!InitializeSteamComponents()) {
+    if (!InitializeSteamComponents(roots)) {
         LOG_ERROR("InitializeSteamComponents failed");
         return 1;
     }
@@ -308,6 +397,11 @@ static uint32_t InitThread(OSTPlatform::DynamicLibrary::ModuleHandle selfModule)
 
     std::vector<std::string> watchDirs = Config::GetLuaPaths();
     watchDirs.push_back(std::string(LuaDir));
+    if (!roots.steamDir.empty() && !SamePath(roots.dataDir, roots.steamDir)) {
+        // Portable root: scripts that are still in Steam keep working.
+        const std::string steamLua = roots.steamDir + "\\config\\lua";
+        if (IsExistingDirectory(steamLua)) watchDirs.push_back(steamLua);
+    }
     for (const auto& dir : watchDirs)
         LuaConfig::ParseDirectory(dir);
 
